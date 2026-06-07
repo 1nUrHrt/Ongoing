@@ -71,6 +71,10 @@ def train_one_epoch(
     print()
     avg_train_loss = train_loss / len(itc_loader)
     avg_train_acc = train_acc / len(itc_loader)
+    logger.info(
+        "Epoch train done  |  avg_loss=%.5f  avg_acc=%.5f  (%d batches)",
+        avg_train_loss, avg_train_acc, total_batch,
+    )
     return avg_train_loss, avg_train_acc
 
 
@@ -110,16 +114,19 @@ def val_one_epoch(
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
     all_probs = torch.cat(all_probs, dim=0).numpy()
+    avg_loss = val_loss / len(itc_loader)
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average=metric_average, zero_division=0)
+    auc = roc_auc_score(all_labels, all_probs, multi_class="ovr", average=metric_average)
+    logger.info(
+        "Validation done  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f",
+        avg_loss, acc, f1, auc,
+    )
     return (
-        val_loss / len(itc_loader),
-        accuracy_score(all_labels, all_preds),
-        f1_score(all_labels, all_preds, average=metric_average, zero_division=0),
-        roc_auc_score(
-            all_labels,
-            all_probs,
-            multi_class="ovr",
-            average=metric_average,
-        ),
+        avg_loss,
+        acc,
+        f1,
+        auc,
     )
 
 
@@ -163,8 +170,9 @@ def train(
 
     pin_memory = True if torch.cuda.is_available() else False
 
-    print(
-        f"[Train Config] Total Epochs:{epochs} Device:{device} Manual Seed:{seed} Metric Average:{metric_average}"
+    logger.info(
+        "Train config | epochs=%d  device=%s  seed=%d  metric=%s",
+        epochs, device, seed, metric_average,
     )
 
     base_dir = os.path.join("./checkpoints", name)
@@ -175,7 +183,9 @@ def train(
 
     datasets = load_data(data_source, split_type, train_size, seed)
     if len(datasets) != 3:
-        raise ValueError("train_size must be not None,got {train_size}")
+        raise ValueError(
+            f"load_data returned {len(datasets)} datasets, expected 3 — train_size={train_size}"
+        )
     drug_set, train_itc, val_itc = datasets
     drug_loader = DataLoader(
         drug_set,
@@ -222,6 +232,10 @@ def train(
         "train_loss": [],
         "train_acc": [],
         "train_timer": [],
+        "val_loss": [],
+        "val_acc": [],
+        "val_f1_score": [],
+        "val_auc": [],
         "val_timer": [],
     }
 
@@ -249,16 +263,14 @@ def train(
         torch.random.set_rng_state(history["torch_random"])
         np.random.set_state(history["numpy_random"])
         random.setstate(history["python_random"])
-        print("[History Model Loaded]")
+        logger.info("Resume checkpoint loaded  |  epoch=%d", start_epoch)
 
     if early_stop.early_stop:
-        print(f"[Early Stop] [Epoch:{start_epoch}/{epochs}] trigger early stop")
+        logger.info("Early stop already triggered at epoch %d/%d — nothing to resume", start_epoch, epochs)
         return
 
     if start_epoch >= epochs:
-        print(
-            f"[Stop Experiment] [Epoch:{start_epoch}/{epochs}] experiment has finished"
-        )
+        logger.info("Experiment already finished at epoch %d/%d — nothing to resume", start_epoch, epochs)
         return
 
     if history is not None and history["result"] is not None:
@@ -266,10 +278,9 @@ def train(
         result = df.to_dict(orient="list")
         total_timer = sum(result["train_timer"]) + sum(result["val_timer"])
 
-    print("[Train Srart]")
+    logger.info("Training started  |  epochs=%d  encoder=%s", epochs, type(encoder).__name__)
     for epoch in range(start_epoch, epochs):
         current_epoch = epoch + 1
-        print(f"[Current Epoch:{current_epoch}/{epochs}]")
         with Timer() as timer:
             train_loss, train_acc = train_one_epoch(
                 encoder,
@@ -281,8 +292,9 @@ def train(
                 device,
                 scaler,
             )
-        print(
-            f"[Train] loss:{train_loss:.5f},acc:{train_acc:.5f},elapsed:{timer.elapsed:.5f} s"
+        logger.info(
+            "Epoch %d/%d  |  train loss=%.5f  acc=%.5f  (%.2fs)",
+            current_epoch, epochs, train_loss, train_acc, timer.elapsed,
         )
         total_timer += timer.elapsed
         result["train_loss"].append(train_loss)
@@ -300,8 +312,9 @@ def train(
                 device,
             )
 
-        print(
-            f"[Val Total] loss:{val_loss:.5f},acc:{val_acc:.5f},f1_score:{val_f1_score:.5f},auc:{val_auc:.5f},elapsed:{timer.elapsed:.5f} s"
+        logger.info(
+            "Epoch %d/%d  |  val  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f  (%.2fs)",
+            current_epoch, epochs, val_loss, val_acc, val_f1_score, val_auc, timer.elapsed,
         )
         total_timer += timer.elapsed
         result["val_loss"].append(val_loss)
@@ -314,11 +327,7 @@ def train(
 
         is_improved = early_stop(val_f1_score)
 
-        if not is_improved:
-            print(
-                f"[Early Stop] [Epoch:{current_epoch}/{epochs}] trigger counter: {early_stop.counter}/{early_stop.patience}"
-            )
-        else:
+        if is_improved:
             torch.save(
                 {
                     "epoch": current_epoch,
@@ -327,8 +336,14 @@ def train(
                 },
                 best_path,
             )
-            print(
-                f"[Save Model] [Epoch:{current_epoch}/{epochs}] save best Model successfully"
+            logger.info(
+                "Epoch %d/%d  |  best model improved → saved best.pt",
+                current_epoch, epochs,
+            )
+        else:
+            logger.info(
+                "Epoch %d/%d  |  no improvement  (%d/%d patience)",
+                current_epoch, epochs, early_stop.counter, early_stop.patience,
             )
 
         checkpoint = {
@@ -348,17 +363,24 @@ def train(
             "train_itc_generator": train_itc_generator.get_state(),
         }
 
-        torch.save(checkpoint, history_path)
-        print(
-            f"[Save Checkpoint] [Epoch:{current_epoch}/{epochs}] save current checkpoint successfully"
+        if current_epoch % 5 == 0:
+            torch.save(checkpoint, history_path)
+            pd.DataFrame(result).to_csv(result_path, index=False)
+            logger.info(
+                "Epoch %d/%d  |  checkpoint saved (history.pt + result.csv)",
+                current_epoch, epochs,
+            )
+
+        logger.info(
+            "Epoch %d/%d  |  cumulative time: %.2fs",
+            current_epoch, epochs, total_timer,
         )
 
-        print(f"[Epoch {current_epoch}/{epochs}] total elapsed:{total_timer}")
-
-        pd.DataFrame(result).to_csv(result_path, index=False)
-
         if early_stop.early_stop:
-            print(f"[Early Stop] [Epoch:{current_epoch}/{epochs}] trigger early stop")
+            logger.info(
+                "Epoch %d/%d  |  early stop triggered",
+                current_epoch, epochs,
+            )
             break
 
 
@@ -367,11 +389,12 @@ def resume_training(name: str):
     try:
         cfg = getattr(config, name).get()
     except AttributeError:
-        logger.warning("%s 配置不存在", name)
+        logger.warning("Config '%s' not found in config.py", name)
         return
 
-    history = torch.load(os.path.join("./checkpoin", name, "history.pt"))
-    result = pd.read_csv(os.path.join("./checkpoin", name, "result.csv"))
+    cfg = {**cfg}
+    history = torch.load(os.path.join("./checkpoints", name, "history.pt"))
+    result = pd.read_csv(os.path.join("./checkpoints", name, "result.csv"))
     history["result"] = result
     train(history=history, **cfg)
 
@@ -387,8 +410,9 @@ def run_training(
     try:
         cfg = getattr(config, name).get()
     except AttributeError:
-        logger.warning("%s 配置不存在", name)
+        logger.warning("Config '%s' not found in config.py", name)
         return
+    cfg = {**cfg}
     cfg["name"] = name
     cfg["encoder"] = encoder
     cfg["metric_average"] = metric_average

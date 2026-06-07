@@ -120,7 +120,7 @@ class FFNLayer(nn.Module):
 class Readout(nn.Module):
     def __init__(self, in_feature, heads, dp_r):
         super().__init__()
-        self.in_features = in_feature
+        self.in_feature = in_feature
         self.dp_r = dp_r
 
         assert in_feature % heads == 0

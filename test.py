@@ -35,11 +35,17 @@ def test(
 ):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(
+        "Testing  |  name=%s  encoder=%s  device=%s  metric=%s",
+        name, encoder, device, metric_average,
+    )
 
-    datasets = load_data(data_source, split_type, seed=seed)
+    datasets = load_data(data_source, split_type, seed=seed, data_split="test")
 
     if len(datasets) != 2:
-        raise ValueError("train_size must be None,got {train_size}")
+        raise ValueError(
+            f"load_data returned {len(datasets)} datasets, expected 2 — data_split='test'"
+        )
     drug_set, test_itc = datasets
 
     pin_memory = True if torch.cuda.is_available() else False
@@ -75,7 +81,7 @@ def test(
     evaluate_path = os.path.join(base_dir, "evaluate.csv")
     evaluate = {}
     if not os.path.exists(best_path):
-        print(f"The best model of current experiment:{name} don't exist")
+        logger.warning("Best model not found: %s/best.pt — skipping evaluation", base_dir)
         return
 
     best_model = torch.load(best_path, weights_only=False)
@@ -84,6 +90,8 @@ def test(
 
     encoder.eval()
     classifier.eval()
+
+    logger.info("Evaluating on test set  |  best_epoch=%d", best_model["epoch"])
 
     test_loss = 0.0
 
@@ -119,6 +127,11 @@ def test(
         all_labels, all_probs, multi_class="ovr", average=metric_average
     )
     pd.DataFrame(evaluate).to_csv(evaluate_path, index=False)
+    logger.info(
+        "Test results  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f  -> %s",
+        evaluate["test_loss"], evaluate["test_acc"],
+        evaluate["test_f1_score"], evaluate["test_auc"], evaluate_path,
+    )
 
 
 def run_test(name: str):
@@ -126,13 +139,14 @@ def run_test(name: str):
     try:
         cfg = getattr(config, name).get()
     except AttributeError:
-        logger.warning("%s 配置不存在", name)
+        logger.warning("Config '%s' not found in config.py", name)
         return
+    cfg = {**cfg}
     cfg["name"] = name
-    del cfg["epochs"]
-    del cfg["lr"]
-    del cfg["min_delta"]
-    del cfg["train_size"]
+    cfg.pop("epochs", None)
+    cfg.pop("lr", None)
+    cfg.pop("min_delta", None)
+    cfg.pop("train_size", None)
     test(**cfg)
 
 

@@ -11,6 +11,9 @@ from torch_geometric.data import Data, Batch
 import time
 
 
+logger = logging.getLogger("data")
+
+
 class Timer:
     def __enter__(self):
         self.start = time.perf_counter()
@@ -25,15 +28,19 @@ class DrugDataset(Dataset):
     def __init__(self, df: pd.DataFrame, mask=None, add_global_features=False):
         self.drug = df
         self.add_global_features = add_global_features
-        # self.pt = Chem.GetPeriodicTable()
+        n_drugs = len(df)
+        logger.info("Building molecular graphs for %d drugs  |  add_global=%s", n_drugs, add_global_features)
         if mask is not None:
+            n_masked = mask.sum() if hasattr(mask, "sum") else len(mask)
             self.drug.loc[mask, "mol"] = self.drug.loc[mask, "smile"].map(
                 lambda s: smiles_to_graph(s, self.add_global_features)
             )
+            logger.info("Graphs computed for %d/%d drugs (masked)", n_masked, n_drugs)
         else:
             self.drug["mol"] = self.drug["smile"].map(
                 lambda s: smiles_to_graph(s, self.add_global_features)
             )
+            logger.info("Graphs computed for all %d drugs", n_drugs)
 
     def __len__(self):
         return len(self.drug)
@@ -84,12 +91,18 @@ class InteractionDataset(Dataset):
 def load_data(
     data_source: Literal["drugbank", "twosides"] = "drugbank",
     split_type: Literal["random", "cluster"] = "random",
-    train_size: float | None = None,
+    train_size: float = 0.8,
     seed=42,
+    data_split: Literal["train", "test"] = "train",
 ):
     base_dir = os.path.join("./data", data_source + "-" + split_type)
     all_drug = pd.read_csv(os.path.join(base_dir, "drug.csv"))
-    itc = pd.read_csv(os.path.join(base_dir, "train.csv"))
+    csv_name = "test.csv" if data_split == "test" else "train.csv"
+    itc = pd.read_csv(os.path.join(base_dir, csv_name))
+    logger.info(
+        "Loading data  |  source=%s  split=%s  file=%s  drugs=%d  pairs=%d",
+        data_source, split_type, csv_name, len(all_drug), len(itc),
+    )
     sub_drug = (
         pd.concat([itc["drug1"], itc["drug2"]])
         .drop_duplicates(keep="first")
@@ -99,16 +112,24 @@ def load_data(
     itc["drug1"] = itc["drug1"].map(sub_drug_map)
     itc["drug2"] = itc["drug2"].map(sub_drug_map)
 
-    mask = [True if i in sub_drug else False for i in range(len(all_drug))]
+    sub_drug_ids = set(sub_drug.values)
+    mask = [i in sub_drug_ids for i in range(len(all_drug))]
 
     all_drug_set = DrugDataset(all_drug, mask=mask)
     sub_drug_set = SubDrugDataset(sub_drug, all_drug_set)
 
-    if train_size is None:
+    if data_split == "test":
+        logger.info("Test data ready  |  drugs=%d  pairs=%d", len(sub_drug), len(itc))
         return (sub_drug_set, InteractionDataset(itc))
 
     train_itc, valid_itc = train_test_split(
-        itc, train_size=train_size, random_state=seed, stratify=itc["Y"]
+        itc, train_size=train_size, random_state=seed, stratify=itc["label"]
+    )
+    train_itc = train_itc.reset_index(drop=True)
+    valid_itc = valid_itc.reset_index(drop=True)
+    logger.info(
+        "Train/val split  |  train_pairs=%d  val_pairs=%d  seed=%d",
+        len(train_itc), len(valid_itc), seed,
     )
 
     return (sub_drug_set, InteractionDataset(train_itc), InteractionDataset(valid_itc))
@@ -122,15 +143,22 @@ def split_data(
 ):
     save_dir = os.path.join("./data", data_source + "-" + split_type)
     os.makedirs(save_dir, exist_ok=True)
+    logger.info(
+        "Splitting data  |  source=%s  split=%s  train_size=%.2f  seed=%d",
+        data_source, split_type, train_size, seed,
+    )
     if data_source == "drugbank":
         if split_type == "random":
             split_drugbank_random(
                 pd.read_csv("./data/drugbank.tab", sep="\t"), train_size, seed, save_dir
             )
+        else:
+            logger.warning("Split type '%s' not yet implemented for drugbank", split_type)
+    else:
+        logger.warning("Data source '%s' not yet implemented", data_source)
 
 
 def split_drugbank_random(df, train_size, seed, save_dir):
-    logger = logging.getLogger("DataSplit")
     drug1 = df[["ID1", "X1"]].drop_duplicates(keep="first")
     drug2 = df[["ID2", "X2"]].drop_duplicates(keep="first")
     columns = ["id", "smile"]
@@ -163,13 +191,9 @@ def split_drugbank_random(df, train_size, seed, save_dir):
         columns=["drug1", "drug2", "label"],
         index=False,
     )
-    logger.info("Split data successfully, saved to directory: '%s'", save_dir)
     logger.info(
-        "Total drug count: %d,Total pair count: %d ,Train pair count: %d, Test pair count: %d",
-        len(drug),
-        len(df),
-        len(train),
-        len(test),
+        "Split complete  |  drugs=%d  total_pairs=%d  train=%d  test=%d  saved to %s",
+        len(drug), len(df), len(train), len(test), save_dir,
     )
 
 
@@ -182,36 +206,36 @@ def one_hot_encoding(x, allowable_set):
 def atom_features(atom):
     features = []
 
-    # 1. 原子类型 (10)
+    # 1. Atom symbol (10)
     features += one_hot_encoding(
         atom.GetSymbol(), ["C", "N", "O", "S", "F", "P", "Cl", "Br", "I", "Other"]
     )
 
-    # 2. 度 (6)
+    # 2. Degree (6)
     features += one_hot_encoding(
         atom.GetDegree(),
         [0, 1, 2, 3, 4, 5, 6],
     )
 
-    # 3. 总氢原子数 (5)
+    # 3. Total hydrogens (5)
     features += one_hot_encoding(
         atom.GetTotalNumHs(),
         [0, 1, 2, 3, 4, 5],
     )
 
-    # 4. 形式电荷 (5)
+    # 4. Formal charge (5)
     features += one_hot_encoding(
         atom.GetFormalCharge(),
         [-2, -1, 0, 1, 2],
     )
 
-    # 5. 芳香性 (1)
+    # 5. Aromaticity (1)
     features.append(int(atom.GetIsAromatic()))
 
-    # 6. 是否在环中 (1)
+    # 6. In ring (1)
     features.append(int(atom.IsInRing()))
 
-    # 7. 杂化类型 (5)
+    # 7. Hybridization (5)
     features += one_hot_encoding(
         atom.GetHybridization(),
         [
@@ -223,7 +247,7 @@ def atom_features(atom):
         ],
     )
 
-    # 8. 手性中心 (3)
+    # 8. Chiral tag (3)
     features += one_hot_encoding(
         atom.GetChiralTag(),
         [
@@ -233,7 +257,7 @@ def atom_features(atom):
         ],
     )
 
-    # 9.原子质量 (1)
+    # 9. Atomic mass (1)
     features.append(atom.GetMass() / 100.0)
 
     return features
@@ -251,7 +275,7 @@ def bond_features(bond):
         bond.IsInRing(),
     ]
 
-    # 键立体化学
+    # Bond stereochemistry
     features += one_hot_encoding(
         bond.GetStereo(),
         [
@@ -277,13 +301,13 @@ def smiles_to_graph(smiles, add_global_features):
             f"UpdatePropertyCache failed for SMILES: '{smiles}'. Original error: {e}"
         ) from e
 
-    # 节点特征
+    # Node features
     x = []
     for atom in mol.GetAtoms():
         x.append(atom_features(atom))
     x = torch.tensor(x, dtype=torch.float)
 
-    # 边特征
+    # Edge features
     edge_index = []
     edge_attr = []
     for bond in mol.GetBonds():
@@ -299,10 +323,10 @@ def smiles_to_graph(smiles, add_global_features):
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attr, dtype=torch.float)
 
-    # 构建Data对象
+    # Build PyG Data object
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
-    # 添加全局分子特征
+    # Attach global molecular descriptors
     if add_global_features:
         try:
             global_features = torch.tensor(
@@ -333,9 +357,9 @@ def itc_collate_fn(batch):
     drug2 = []
     label = []
     for data in batch:
-        drug1.append(data[0])
-        drug2.append(data[1])
-        label.append(data[2])
+        drug1.append(data["drug1"])
+        drug2.append(data["drug2"])
+        label.append(data["label"])
     return torch.tensor(drug1), torch.tensor(drug2), torch.tensor(label)
 
 
