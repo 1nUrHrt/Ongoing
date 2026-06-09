@@ -185,12 +185,10 @@ def train(
     result_path = os.path.join(base_dir, "result.csv")
     cm_path = os.path.join(base_dir, "confusion_matrix.csv")
 
-    datasets = load_data(data_source, split_type, train_size, seed)
-    if len(datasets) != 3:
-        raise ValueError(
-            f"load_data returned {len(datasets)} datasets, expected 3 — train_size={train_size}"
-        )
-    drug_set, train_itc, val_itc = datasets
+    drug_set, train_itc, val_itc, _, _ = load_data(
+        data_source, split_type, train_size, seed
+    )
+    assert drug_set is not None and train_itc is not None and val_itc is not None
     drug_loader = DataLoader(
         drug_set,
         collate_fn=drug_collate_fn,

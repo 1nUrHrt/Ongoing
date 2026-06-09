@@ -41,16 +41,9 @@ def test(config_class_name: str, config: Config):
         split_type,
     )
 
-    datasets = load_data(data_source, split_type, seed=seed, data_split="test")
-
-    if len(datasets) != 2:
-        raise ValueError(
-            f"load_data returned {len(datasets)} datasets, expected 2 — data_split='test'"
-        )
-    drug_set, test_itc = datasets
-
     pin_memory = True if torch.cuda.is_available() else False
-
+    _, _, _, drug_set, test_itc = load_data(data_source, split_type, None, seed=seed)
+    assert drug_set is not None and test_itc is not None
     drug_loader = DataLoader(
         drug_set,
         collate_fn=drug_collate_fn,

@@ -15,6 +15,10 @@ def main():
     p_train = sub.add_parser("train", help="Start a new training run")
     p_train.add_argument("config", help="Config class name in config.py")
 
+    # ---- train_all ----
+    p_train_all = sub.add_parser("train_all", help="Start a training run batch task")
+    p_train_all.add_argument("config", help="Config class name in config.py list")
+
     # ---- resume ----
     p_resume = sub.add_parser(
         "resume", help="Resume a training run that has a checkpoint under checkpoints/"

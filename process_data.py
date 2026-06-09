@@ -84,7 +84,7 @@ class InteractionDataset(Dataset):
         return self.itc["scenario"]
 
     def __getitem__(self, idx):
-        
+
         return self.itc.loc[idx]
 
     @property
@@ -92,25 +92,9 @@ class InteractionDataset(Dataset):
         return self.itc["label"]
 
 
-def load_data(
-    data_source: Literal["drugbank", "twosides"] = "drugbank",
-    split_type: Literal["random", "cluster"] = "random",
-    train_size: float = 0.8,
-    seed=42,
-    data_split: Literal["train", "test"] = "train",
-):
-    base_dir = os.path.join("./data", data_source + "-" + split_type)
-    all_drug = pd.read_csv(os.path.join(base_dir, "drug.csv"))
-    csv_name = "test.csv" if data_split == "test" else "train.csv"
-    itc = pd.read_csv(os.path.join(base_dir, csv_name))
-    logger.info(
-        "Loading data  |  source=%s  split=%s  file=%s  drugs=%d  pairs=%d",
-        data_source,
-        split_type,
-        csv_name,
-        len(all_drug),
-        len(itc),
-    )
+def _load_data(all_drug_path: str, itc_path: str):
+    all_drug = pd.read_csv(all_drug_path)
+    itc = pd.read_csv(itc_path)
     sub_drug = (
         pd.concat([itc["drug1"], itc["drug2"]])
         .drop_duplicates(keep="first")
@@ -119,30 +103,46 @@ def load_data(
     sub_drug_map = {key: i for i, key in enumerate(sub_drug)}
     itc["drug1"] = itc["drug1"].map(sub_drug_map)
     itc["drug2"] = itc["drug2"].map(sub_drug_map)
-
     sub_drug_ids = set(sub_drug.values)
     mask = [i in sub_drug_ids for i in range(len(all_drug))]
 
     all_drug_set = DrugDataset(all_drug, mask=mask)
-    sub_drug_set = SubDrugDataset(sub_drug, all_drug_set)
+    return SubDrugDataset(sub_drug, all_drug_set), itc
 
-    if data_split == "test":
-        logger.info("Test data ready  |  drugs=%d  pairs=%d", len(sub_drug), len(itc))
-        return (sub_drug_set, InteractionDataset(itc))
 
-    train_itc, valid_itc = train_test_split(
-        itc, train_size=train_size, random_state=seed, stratify=itc["label"]
+def load_data(
+    data_source: Literal["drugbank", "twosides"],
+    split_type: Literal["random", "cluster"],
+    train_size: float | None,
+    seed=42,
+):
+    base_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
+    all_drug_path = os.path.join(base_dir, "drug.csv")
+    if train_size is not None:
+        sub_train_drug, train_itc = _load_data(
+            all_drug_path, os.path.join(base_dir, "train.csv")
+        )
+        train_itc, valid_itc = train_test_split(
+            train_itc,
+            train_size=train_size,
+            random_state=seed,
+            stratify=train_itc["label"],
+        )
+        train_itc = train_itc.reset_index(drop=True)
+        valid_itc = valid_itc.reset_index(drop=True)
+        return (
+            sub_train_drug,
+            InteractionDataset(train_itc),
+            InteractionDataset(valid_itc),
+            None,
+            None,
+        )
+
+    sub_test_drug, test_itc = _load_data(
+        all_drug_path, os.path.join(base_dir, "test.csv")
     )
-    train_itc = train_itc.reset_index(drop=True)
-    valid_itc = valid_itc.reset_index(drop=True)
-    logger.info(
-        "Train/val split  |  train_pairs=%d  val_pairs=%d  seed=%d",
-        len(train_itc),
-        len(valid_itc),
-        seed,
-    )
 
-    return (sub_drug_set, InteractionDataset(train_itc), InteractionDataset(valid_itc))
+    return None, None, None, sub_test_drug, InteractionDataset(test_itc)
 
 
 def split_data(
@@ -151,7 +151,7 @@ def split_data(
     train_size=0.8,
     seed=42,
 ):
-    save_dir = os.path.join("./data", data_source + "-" + split_type)
+    save_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
     os.makedirs(save_dir, exist_ok=True)
     logger.info(
         "Splitting data  |  source=%s  split=%s  train_size=%.2f  seed=%d",

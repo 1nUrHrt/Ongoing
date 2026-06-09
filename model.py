@@ -1,7 +1,12 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch_geometric.nn import MessagePassing, GINConv
+from torch_geometric.nn import (
+    MessagePassing,
+    GINConv,
+    global_mean_pool,
+    global_max_pool,
+)
 from torch_geometric.utils import softmax, scatter
 from typing import Literal
 
@@ -164,124 +169,6 @@ class ReadoutBlock(nn.Module):
         h = self.ffn(h)
         h = self.dropout(h)
         return h + x
-
-
-class AttnResidual(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.norm = nn.RMSNorm(d_model)
-        self.pseudo_query = nn.Parameter(torch.zeros(d_model))
-
-    def forward(
-        self, values: list[torch.Tensor], partial_value: torch.Tensor | None
-    ) -> torch.Tensor:
-        if partial_value is None:
-            arr = []
-        else:
-            arr = [partial_value]
-        V = torch.stack(values + arr, dim=0)  # [L, N, d]
-        K = self.norm(V)
-        logits = torch.einsum("d,lnd->ln", self.pseudo_query, K)  # [L, N]
-        alpha = logits.softmax(dim=0)  # [L, N] — per-node weights over depth
-        h = torch.einsum("ln,lnd->nd", alpha, V)  # [N, d]
-        return h
-
-
-class ResTransformerLayer(nn.Module):
-    def __init__(
-        self,
-        h_dim: int,
-        dp_r: float,
-        heads: int,
-    ):
-        super().__init__()
-        self.h_dim = h_dim
-        self.heads = heads
-        self.dp_r = dp_r
-
-        self.attn_GIN = AttnGINLayer(h_dim, dp_r=dp_r, heads=heads)
-
-        self.FFN = FFNLayer(h_dim, dp_r=dp_r)
-
-        self.attn_res2GIN = AttnResidual(h_dim)
-        self.attn_res2FFN = AttnResidual(h_dim)
-
-    def forward(self, values, partial_value, edge_index, edge_attr):
-
-        h = self.attn_res2GIN(values, partial_value)
-        attn_out = self.attn_GIN(h, edge_index, edge_attr)
-        if partial_value is None:
-            partial_value = attn_out
-        else:
-            partial_value = partial_value + attn_out
-
-        h = self.attn_res2FFN(values, partial_value)
-
-        partial_value = partial_value + self.FFN(h)
-
-        return partial_value
-
-
-class AttnResEncoder(nn.Module):
-    def __init__(
-        self,
-        node_dim: int,
-        edge_dim: int,
-        h_dim: int,
-        block_num: int,
-        dp_r: float,
-        heads: int,
-        block_size: int = 1,
-    ):
-        super().__init__()
-        self.node_dim = node_dim
-        self.edge_dim = edge_dim
-        self.h_dim = h_dim
-        self.block_num = block_num
-        self.block_size = block_size
-        self.heads = heads
-        self.dp_r = dp_r
-
-        self.node_proj = (
-            nn.Linear(node_dim, h_dim) if node_dim != h_dim else nn.Identity()
-        )
-        self.edge_proj = (
-            nn.Linear(edge_dim, h_dim) if edge_dim != h_dim else nn.Identity()
-        )
-
-        self.res_transformer_layer_list = nn.ModuleList(
-            [
-                ResTransformerLayer(
-                    h_dim=h_dim,
-                    dp_r=dp_r,
-                    heads=heads,
-                )
-                for _ in range(block_num)
-            ]
-        )
-        self.final_attn_res = AttnResidual(h_dim)
-        self.readout = ReadoutBlock(in_features=h_dim, dp_r=dp_r, heads=heads)
-
-    def forward(self, batch_data):
-        nodes, edge_index, edge_attr, index = (
-            batch_data.x,
-            batch_data.edge_index,
-            batch_data.edge_attr,
-            batch_data.batch,
-        )
-        nodes = self.node_proj(nodes)
-        edge_attr = self.edge_proj(edge_attr)
-
-        values = [nodes]
-        partial_value = None
-        for i, block in enumerate(self.res_transformer_layer_list):
-            partial_value = block(values, partial_value, edge_index, edge_attr)
-
-            if (i + 1) % self.block_size == 0 or i == self.block_num - 1:
-                values.append(partial_value)
-                partial_value = None
-        h = self.final_attn_res(values, partial_value)
-        return self.readout(h, index)
 
 
 class TransformerLayer(nn.Module):
@@ -458,7 +345,6 @@ class GINEncoder(nn.Module):
                 nn.Linear(h_features, h_features),
             )
             self.gin_list.append(GINConv(mlp, train_eps=True))
-        self.readout = ReadoutBlock(in_features=h_features, dp_r=dp_r, heads=heads)
 
     def forward(self, batch_data):
         nodes, edge_index, index = (
@@ -472,7 +358,9 @@ class GINEncoder(nn.Module):
             h = F.relu(h)
             h = F.dropout(h, p=self.dp_r, training=self.training)
             nodes = h + nodes
-        return self.readout(nodes, index)
+        return torch.cat(
+            [global_mean_pool(nodes, index), global_max_pool(nodes, index)], dim=1
+        )
 
 
-__all__ = ["AttnEncoder", "AttnResEncoder", "Classifier", "EarlyStop", "GINEncoder"]
+__all__ = ["AttnEncoder", "Classifier", "EarlyStop", "GINEncoder"]
