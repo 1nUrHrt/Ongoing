@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-from torch_geometric.nn import MessagePassing
+from torch.nn import functional as F
+from torch_geometric.nn import MessagePassing, GINConv
 from torch_geometric.utils import softmax, scatter
 from typing import Literal
 
@@ -440,4 +441,38 @@ class EarlyStop:
         self.early_stop = state_dict["early_stop"]
 
 
-__all__ = ["AttnEncoder", "AttnResEncoder", "Classifier", "EarlyStop"]
+class GINEncoder(nn.Module):
+    def __init__(self, in_features, h_features, block_num, dp_r, heads):
+        super().__init__()
+        self.dp_r = dp_r
+        self.proj = (
+            nn.Linear(in_features, h_features)
+            if in_features != h_features
+            else nn.Identity()
+        )
+        self.gin_list = nn.ModuleList()
+        for _ in range(block_num):
+            mlp = nn.Sequential(
+                nn.Linear(h_features, h_features),
+                nn.ReLU(),
+                nn.Linear(h_features, h_features),
+            )
+            self.gin_list.append(GINConv(mlp, train_eps=True))
+        self.readout = ReadoutBlock(in_features=h_features, dp_r=dp_r, heads=heads)
+
+    def forward(self, batch_data):
+        nodes, edge_index, index = (
+            batch_data.x,
+            batch_data.edge_index,
+            batch_data.batch,
+        )
+        nodes = self.proj(nodes)
+        for layer in self.gin_list:
+            h = layer(nodes, edge_index)
+            h = F.relu(h)
+            h = F.dropout(h, p=self.dp_r, training=self.training)
+            nodes = h + nodes
+        return self.readout(nodes, index)
+
+
+__all__ = ["AttnEncoder", "AttnResEncoder", "Classifier", "EarlyStop", "GINEncoder"]

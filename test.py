@@ -3,41 +3,42 @@ import pandas as pd
 import torch
 import config
 from process_data import load_data, drug_collate_fn, itc_collate_fn
-from model import AttnEncoder, AttnResEncoder, Classifier
+import model
+from model import Classifier
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-
 import logging
+from config import Config
 
 logger = logging.getLogger("test")
 
 
-def test(
-    name,
-    encoder,
-    metric_average,
-    data_source,
-    split_type,
-    node_dim,
-    edge_dim,
-    h_dim,
-    heads,
-    dp_r,
-    seed,
-    block_num,
-    block_size,
-    class_num,
-    drug_batch_size,
-    itc_batch_size,
-    num_workers,
-    label_smoothing,
-):
+def test(config_class_name: str, config: Config):
+    name = config_class_name
+    encoder_type = config.encoder
+    data_source = config.data_source
+    split_type = config.split_type
+    node_dim = config.node_dim
+    edge_dim = config.edge_dim
+    h_dim = config.h_dim
+    heads = config.heads
+    dp_r = config.dp_r
+    seed = config.seed
+    block_num = config.block_num
+    class_num = config.class_num
+    drug_batch_size = config.drug_batch_size
+    itc_batch_size = config.itc_batch_size
+    label_smoothing = config.label_smoothing
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(
-        "Testing  |  name=%s  encoder=%s  device=%s  metric=%s",
-        name, encoder, device, metric_average,
+        "Testing  |  name=%s  encoder=%s  device=%s  data_source=%s split_type=%s",
+        name,
+        encoder_type,
+        device,
+        data_source,
+        split_type,
     )
 
     datasets = load_data(data_source, split_type, seed=seed, data_split="test")
@@ -55,7 +56,7 @@ def test(
         collate_fn=drug_collate_fn,
         batch_size=drug_batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
+        num_workers=2,
         shuffle=False,
     )
     test_loader = DataLoader(
@@ -63,25 +64,24 @@ def test(
         collate_fn=itc_collate_fn,
         batch_size=itc_batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
+        num_workers=2,
         shuffle=False,
     )
-
-    if encoder == "AttnEncoder":
-        encoder = AttnEncoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads)
+    encoder = getattr(model, encoder_type)
+    if encoder_type == "AttnEncoder":
+        encoder = encoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads).to(device)
     else:
-        encoder = AttnResEncoder(
-            node_dim, edge_dim, h_dim, block_num, dp_r, heads, block_size=block_size
-        )
+        encoder = encoder(node_dim, h_dim, block_num, dp_r, heads).to(device)
     classifier = Classifier(h_dim, class_num, dp_r).to(device)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
-
     base_dir = os.path.join("./checkpoints", name)
     best_path = os.path.join(base_dir, "best.pt")
     evaluate_path = os.path.join(base_dir, "evaluate.csv")
     evaluate = {}
     if not os.path.exists(best_path):
-        logger.warning("Best model not found: %s/best.pt — skipping evaluation", base_dir)
+        logger.warning(
+            "Best model not found: %s/best.pt — skipping evaluation", base_dir
+        )
         return
 
     best_model = torch.load(best_path, weights_only=False)
@@ -121,33 +121,30 @@ def test(
     evaluate["test_loss"] = test_loss / len(test_loader)
     evaluate["test_acc"] = accuracy_score(all_labels, all_preds)
     evaluate["test_f1_score"] = f1_score(
-        all_labels, all_preds, average=metric_average, zero_division=0
+        all_labels, all_preds, average="macro", zero_division=0
     )
     evaluate["test_auc"] = roc_auc_score(
-        all_labels, all_probs, multi_class="ovr", average=metric_average
+        all_labels, all_probs, multi_class="ovr", average="macro"
     )
     pd.DataFrame(evaluate).to_csv(evaluate_path, index=False)
     logger.info(
         "Test results  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f  -> %s",
-        evaluate["test_loss"], evaluate["test_acc"],
-        evaluate["test_f1_score"], evaluate["test_auc"], evaluate_path,
+        evaluate["test_loss"],
+        evaluate["test_acc"],
+        evaluate["test_f1_score"],
+        evaluate["test_auc"],
+        evaluate_path,
     )
 
 
-def run_test(name: str):
-    cfg = None
+def run_test(config_class_name: str):
+    cfg: Config
     try:
-        cfg = getattr(config, name).get()
+        cfg = getattr(config, config_class_name)
     except AttributeError:
-        logger.warning("Config '%s' not found in config.py", name)
+        logger.warning("Config '%s' not found in config.py", config_class_name)
         return
-    cfg = {**cfg}
-    cfg["name"] = name
-    cfg.pop("epochs", None)
-    cfg.pop("lr", None)
-    cfg.pop("min_delta", None)
-    cfg.pop("train_size", None)
-    test(**cfg)
+    test(config_class_name, cfg)
 
 
-__all__ = ['run_test']
+__all__ = ["run_test"]

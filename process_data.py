@@ -84,6 +84,7 @@ class InteractionDataset(Dataset):
         return self.itc["scenario"]
 
     def __getitem__(self, idx):
+        
         return self.itc.loc[idx]
 
     @property

@@ -1,47 +1,71 @@
 import pandas as pd
 from rdkit import Chem
 import torch
-
-from process_data import smiles_to_graph
-
-
+from collections import Counter
+from process_data import smiles_to_graph, load_data
+from config import gin_Cos_BM3
 if __name__ == "__main__":
-    atom_symbol = {}
-    atom_counter = {}
-    drug = pd.read_csv("./data/drugbank-random/drug.csv")
-    drug["mol"] = [smiles_to_graph(s) for s in drug["smile"]]
-    is_nan_arr = []
-    is_inf_arr = []
-    # mol = drug.loc[2,"mol"]
-    # print(mol.x)
+    print(gin_Cos_BM3.encoder)
 
-    for i, mol in enumerate(drug["mol"]):
-        x, edge_attr, g = mol.x, mol.edge_attr, mol.global_features
-        x_is_nan = torch.any(torch.isnan(x))
-        if x_is_nan.item():
-            print(i, "x_is_nan")
-            break
-        e_is_nan = torch.any(torch.isnan(edge_attr))
-        if e_is_nan.item():
-            print(i, "e_is_nan")
-            break
-        g_is_nan = torch.any(torch.isnan(g))
-        if x_is_nan.item():
-            print(i, "g_is_nan")
-            break
-        x_is_inf = torch.any(torch.isinf(x))
-        if x_is_inf.item():
-            print(i, "x_is_inf")
-            break
-        e_is_inf = torch.any(torch.isinf(edge_attr))
-        if e_is_inf.item():
-            print(i, "e_is_inf")
-            break
-        g_is_inf = torch.any(torch.isinf(g))
-        if g_is_inf.item():
-            print(i, "g_is_inf")
-            break
-    print("ok")
+    # data = load_data()
+    # if len(data) == 3:
+    #     drug_set, train_itc, val_itc = data
+    #     s = Counter(train_itc.label)
+    #     c= {
+    #         'class':[],
+    #         'count':[]
+    #     }
+    #     for i in sorted(s.keys()):
+    #         c['class'].append(i)
+    #         c['count'].append(s[i])
+
+    #     pd.DataFrame(c).to_csv("train_static.csv",index=False)
+    #     s = Counter(val_itc.label)
+    #     c= {
+    #         'class':[],
+    #         'count':[]
+    #     }
+    #     for i in sorted(s.keys()):
+    #         c['class'].append(i)
+    #         c['count'].append(s[i])
+
+    #     pd.DataFrame(c).to_csv("val_static.csv",index=False)
+    # atom_symbol = {}
+    # atom_counter = {}
+    # drug = pd.read_csv("./data/drugbank-random/drug.csv")
+    # drug["mol"] = [smiles_to_graph(s) for s in drug["smile"]]
+    # is_nan_arr = []
+    # is_inf_arr = []
+    # # mol = drug.loc[2,"mol"]
+    # # print(mol.x)
+
+    # for i, mol in enumerate(drug["mol"]):
+    #     x, edge_attr, g = mol.x, mol.edge_attr, mol.global_features
+    #     x_is_nan = torch.any(torch.isnan(x))
+    #     if x_is_nan.item():
+    #         print(i, "x_is_nan")
+    #         break
+    #     e_is_nan = torch.any(torch.isnan(edge_attr))
+    #     if e_is_nan.item():
+    #         print(i, "e_is_nan")
+    #         break
+    #     g_is_nan = torch.any(torch.isnan(g))
+    #     if x_is_nan.item():
+    #         print(i, "g_is_nan")
+    #         break
+    #     x_is_inf = torch.any(torch.isinf(x))
+    #     if x_is_inf.item():
+    #         print(i, "x_is_inf")
+    #         break
+    #     e_is_inf = torch.any(torch.isinf(edge_attr))
+    #     if e_is_inf.item():
+    #         print(i, "e_is_inf")
+    #         break
+    #     g_is_inf = torch.any(torch.isinf(g))
+    #     if g_is_inf.item():
+    #         print(i, "g_is_inf")
+    #         break
+    # print("ok")
 
     #     is_nan_arr.append(is_nan)
     #     is_inf_arr.append(is_inf)

@@ -1,62 +1,71 @@
-from typing import Literal
+from typing import ClassVar, Literal
 
 
 class Config:
+    _required_fields = {
+        "encoder",
+        "data_source",
+        "split_type",
+        "epochs",
+        "node_dim",
+        "edge_dim",
+        "h_dim",
+        "lr",
+        "heads",
+        "dp_r",
+        "train_size",
+        "seed",
+        "block_num",
+        "class_num",
+        "drug_batch_size",
+        "itc_batch_size",
+        "label_smoothing",
+    }
+    encoder: ClassVar[Literal["AttnEncoder", "GINEncoder"]]
+    data_source: ClassVar[Literal["drugbank", "twosides"]]
+    split_type: ClassVar[Literal["random", "cluster"]]
+    epochs: ClassVar[int]
+    node_dim: ClassVar[int]
+    edge_dim: ClassVar[int]
+    h_dim: ClassVar[int]
+    lr: ClassVar[float]
+    heads: ClassVar[int]
+    dp_r: ClassVar[float]
+    train_size: ClassVar[float]
+    seed: ClassVar[int]
+    block_num: ClassVar[int]
+    class_num: ClassVar[int]
+    drug_batch_size: ClassVar[int]
+    itc_batch_size: ClassVar[int]
+    label_smoothing: ClassVar[float]
+
     @classmethod
-    def get(cls):
-        return {
-            k: v
-            for k, v in cls.__dict__.items()
-            if not k.startswith("_") and not callable(v)
-        }
+    def __init_subclass__(cls):
+        for field in cls._required_fields:
+            if field not in cls.__dict__:
+                raise NotImplementedError(
+                    f"子类 {cls.__name__} 必须显式设置属性: {field}"
+                )
 
 
-class default(Config):
-    encoder: Literal["AttnEncoder", "AttnResEncoder"] = "AttnEncoder"
-    metric_average: Literal["macro", "weighted", "micro"] = "macro"
-    data_source: Literal["drugbank", "twosides"] = "drugbank"
-    split_type: Literal["random", "cluster"] = "random"
-
-    epochs: int = 200
-    node_dim: int = 39
-    edge_dim: int = 10
-    h_dim: int = 128
-    lr: float = 0.001
-    heads: int = 8
-    dp_r: float = 0.1
-    train_size: float = 0.8
-    seed: int = 42
-    block_num: int = 6
-    block_size: int = 2
-    class_num: int = 86
-    drug_batch_size: int = 2048
-    itc_batch_size: int = 20480
-    num_workers: int = 2
-    label_smoothing: float = 0.1
-    min_delta: float = 0.001
+class attn_REOP_BM3(Config):
+    encoder = "AttnEncoder"
+    data_source = "drugbank"
+    split_type = "random"
+    epochs = 200
+    node_dim = 86
+    edge_dim = 13
+    h_dim = 128
+    lr = 0.001
+    heads = 8
+    dp_r = 0.1
+    train_size = 0.8
+    seed = 42
+    block_num = 3
+    class_num = 86
+    drug_batch_size = 2048
+    itc_batch_size = 20480
+    label_smoothing = 0.1
 
 
 
-class attn_CosLR(Config):
-    encoder: Literal["AttnEncoder", "AttnResEncoder"] = "AttnEncoder"
-    metric_average: Literal["macro", "weighted", "micro"] = "macro"
-    data_source: Literal["drugbank", "twosides"] = "drugbank"
-    split_type: Literal["random", "cluster"] = "random"
-
-    epochs: int = 200
-    node_dim: int = 86
-    edge_dim: int = 13
-    h_dim: int = 128
-    lr: float = 0.0001
-    heads: int = 8
-    dp_r: float = 0.1
-    train_size: float = 0.8
-    seed: int = 42
-    block_num: int = 6
-    block_size: int = 1
-    class_num: int = 86
-    drug_batch_size: int = 2048
-    itc_batch_size: int = 20480
-    num_workers: int = 2
-    label_smoothing: float = 0.1
-    min_delta: float = 0.001

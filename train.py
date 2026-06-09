@@ -3,15 +3,17 @@ import random
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
 from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau,CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn import CrossEntropyLoss
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from process_data import Timer, load_data, drug_collate_fn, itc_collate_fn
-from model import EarlyStop, AttnEncoder, AttnResEncoder, Classifier
-from typing import Literal
+import model
+from model import EarlyStop, Classifier
+from typing import List
 import config
+from config import Config
 import logging
 
 logger = logging.getLogger("train")
@@ -86,7 +88,6 @@ def val_one_epoch(
     drug_loader,
     itc_loader,
     criterion,
-    metric_average,
     device,
 ):
     encoder.eval()
@@ -118,10 +119,8 @@ def val_one_epoch(
     all_probs = torch.cat(all_probs, dim=0).numpy()
     avg_loss = val_loss / len(itc_loader)
     acc = accuracy_score(all_labels, all_preds)
-    f1 = f1_score(all_labels, all_preds, average=metric_average, zero_division=0)
-    auc = roc_auc_score(
-        all_labels, all_probs, multi_class="ovr", average=metric_average
-    )
+    f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    auc = roc_auc_score(all_labels, all_probs, multi_class="ovr", average="macro")
     cm = confusion_matrix(all_labels, all_preds)
     logger.info(
         "Validation done  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f",
@@ -134,30 +133,28 @@ def val_one_epoch(
 
 
 def train(
-    name,
-    encoder,
-    metric_average,
-    data_source,
-    split_type,
-    epochs,
-    node_dim,
-    edge_dim,
-    h_dim,
-    lr,
-    heads,
-    dp_r,
-    train_size,
-    seed,
-    block_num,
-    block_size,
-    class_num,
-    drug_batch_size,
-    itc_batch_size,
-    num_workers,
-    label_smoothing,
-    min_delta,
+    config_class_name: str,
+    config: Config,
     history=None,
 ):
+    name = config_class_name
+    encoder_type = config.encoder
+    data_source = config.data_source
+    split_type = config.split_type
+    epochs = config.epochs
+    node_dim = config.node_dim
+    edge_dim = config.edge_dim
+    h_dim = config.h_dim
+    lr = config.lr
+    heads = config.heads
+    dp_r = config.dp_r
+    train_size = config.train_size
+    seed = config.seed
+    block_num = config.block_num
+    class_num = config.class_num
+    drug_batch_size = config.drug_batch_size
+    itc_batch_size = config.itc_batch_size
+    label_smoothing = config.label_smoothing
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     start_epoch = 0
@@ -173,13 +170,14 @@ def train(
     pin_memory = True if torch.cuda.is_available() else False
 
     logger.info(
-        "Train config | epochs=%d  device=%s  seed=%d  metric=%s",
+        "Train config | epochs=%d  encoder=%s  data_source=%s  split_type=%s  device=%s  seed=%d",
         epochs,
+        encoder_type,
+        data_source,
+        split_type,
         device,
         seed,
-        metric_average,
     )
-
     base_dir = os.path.join("./checkpoints", name)
     os.makedirs(base_dir, exist_ok=True)
     best_path = os.path.join(base_dir, "best.pt")
@@ -198,7 +196,7 @@ def train(
         collate_fn=drug_collate_fn,
         batch_size=drug_batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
+        num_workers=2,
         shuffle=False,
     )
     train_loader = DataLoader(
@@ -206,7 +204,7 @@ def train(
         collate_fn=itc_collate_fn,
         batch_size=itc_batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
+        num_workers=2,
         shuffle=True,
         generator=train_itc_generator,
     )
@@ -216,25 +214,20 @@ def train(
         collate_fn=itc_collate_fn,
         batch_size=itc_batch_size,
         pin_memory=pin_memory,
-        num_workers=num_workers,
+        num_workers=2,
         shuffle=False,
     )
-    if encoder == "AttnEncoder":
-        encoder = AttnEncoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads).to(
-            device
-        )
+    encoder = getattr(model, encoder_type)
+    if encoder_type == "AttnEncoder":
+        encoder = encoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads).to(device)
     else:
-        encoder = AttnResEncoder(
-            node_dim, edge_dim, h_dim, block_num, dp_r, heads, block_size=block_size
-        ).to(device)
+        encoder = encoder(node_dim, h_dim, block_num, dp_r, heads).to(device)
+
     classifier = Classifier(h_dim, class_num, dp_r).to(device)
     optimizer = Adam(list(encoder.parameters()) + list(classifier.parameters()), lr=lr)
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-6
-    )
-    # scheduler = CosineAnnealingLR(optimizer,epochs/2,eta_min=0.00001)
+    scheduler = CosineAnnealingLR(optimizer, epochs // 2, eta_min=0.00001)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
-    early_stop = EarlyStop(patience=10, mode="max", min_delta=min_delta)
+    early_stop = EarlyStop(patience=10, mode="max", min_delta=0.001)
     scaler = torch.GradScaler() if torch.cuda.is_available() else None
 
     result = {
@@ -295,9 +288,6 @@ def train(
         result = df.to_dict(orient="list")
         total_timer = sum(result["train_timer"]) + sum(result["val_timer"])
 
-    logger.info(
-        "Training started  |  epochs=%d  encoder=%s", epochs, type(encoder).__name__
-    )
     for epoch in range(start_epoch, epochs):
         current_epoch = epoch + 1
         with Timer() as timer:
@@ -331,7 +321,6 @@ def train(
                 drug_loader,
                 val_loader,
                 criterion,
-                metric_average,
                 device,
             )
 
@@ -352,8 +341,7 @@ def train(
         result["val_auc"].append(val_auc)
         result["val_timer"].append(timer.elapsed)
 
-        scheduler.step(val_f1_score)
-        # scheduler.step()
+        scheduler.step()
         is_improved = early_stop(val_f1_score)
 
         if is_improved:
@@ -427,48 +415,40 @@ def train(
             break
 
 
-def resume_training(name: str):
-    cfg = None
+def resume_training(config_class_name: str):
+    cfg: Config
     try:
-        cfg = getattr(config, name).get()
+        cfg = getattr(config, config_class_name)
     except AttributeError:
-        logger.warning("Config '%s' not found in config.py", name)
+        logger.warning("Config '%s' not found in config.py", config_class_name)
         return
-
-    cfg = {**cfg}
-    history = torch.load(
-        os.path.join("./checkpoints", name, "history.pt"), weights_only=False
-    )
-    result = pd.read_csv(os.path.join("./checkpoints", name, "result.csv"))
+    history_path = os.path.join("./checkpoints", config_class_name, "history.pt")
+    result_path = os.path.join("./checkpoints", config_class_name, "history.pt")
+    if not os.path.exists(history_path) or not os.path.exists(result_path):
+        logger.warning(
+            "history.pt or result.csv not found for config %s,resume_training failed ",
+            config_class_name,
+        )
+        return
+    history = torch.load(history_path, weights_only=False)
+    result = pd.read_csv(result_path)
     history["result"] = result
-    cfg["name"] = name
-    train(history=history, **cfg)
+    train(config_class_name, cfg, history=history)
 
 
-def run_training(
-    name: str,
-    encoder: Literal["AttnEncoder", "AttnResEncoder"] | None = None,
-    metric_average: Literal["macro", "weighted", "micro"] | None = None,
-    data_source: Literal["drugbank", "twosides"] | None = None,
-    split_type: Literal["random", "cluster"] | None = None,
-):
-    cfg = None
+def run_training(config_class_name: str):
+    cfg: Config
     try:
-        cfg = getattr(config, name).get()
+        cfg = getattr(config, config_class_name)
     except AttributeError:
-        logger.warning("Config '%s' not found in config.py", name)
+        logger.warning("Config '%s' not found in config.py", config_class_name)
         return
-    cfg = {**cfg}
-    cfg["name"] = name
-    if encoder is not None:
-        cfg["encoder"] = encoder
-    if metric_average is not None:
-        cfg["metric_average"] = metric_average
-    if data_source is not None:
-        cfg["data_source"] = data_source
-    if split_type is not None:
-        cfg["split_type"] = split_type
-    train(**cfg)
+    train(config_class_name, cfg)
+
+
+def train_all(config_class_name_arr: List[str]):
+    for name in config_class_name_arr:
+        run_training(name)
 
 
 __all__ = ["resume_training", "run_training"]
