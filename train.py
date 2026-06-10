@@ -168,7 +168,8 @@ def train(
     train_itc_generator = torch.Generator()
     train_itc_generator.manual_seed(seed)
 
-    pin_memory = True if torch.cuda.is_available() else False
+    # pin_memory = True if torch.cuda.is_available() else False
+    pin_memory = False
 
     logger.info(
         "Train config | epochs=%d  encoder=%s  data_source=%s  split_type=%s  device=%s  seed=%d",

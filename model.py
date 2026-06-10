@@ -43,10 +43,10 @@ class AttnGIN(nn.Module):
         v: torch.Tensor = self.v_proj(msg_input).view(
             -1, self.heads, self.head_dim
         )  # E,M -> E,H,D
-        attn_score = torch.einsum("ehd,ehd->nh", q, k) / (self.head_dim**0.5)  # E,H,D
+        attn_score = torch.einsum("ehd,ehd->eh", q, k) / (self.head_dim**0.5)  # E,H,D
         alpha = softmax(attn_score, edge_index[1], dim=0)
         alpha = self.dropout(alpha)
-        weighted_v = torch.einsum("eh,ehd->nhd", alpha, v).view(
+        weighted_v = torch.einsum("eh,ehd->ehd", alpha, v).view(
             -1, self.d_model
         )  # E,H,D -> E,M
         out = scatter(weighted_v, edge_index[1], dim=0, reduce="sum")  # N,M

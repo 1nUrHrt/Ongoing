@@ -12,3 +12,4 @@ dependencies = [
     "torch-geometric>=2.7.0",
     "tqdm>=4.67.3",
 ]
+# uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
