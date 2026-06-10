@@ -50,7 +50,7 @@ class Config:
                 )
 
 
-class attn_gin_tf(Config):
+class attn_gin_tf_de(Config):
     encoder = "AttnGINTFEncoder"
     data_source = "drugbank"
     split_type = "random"

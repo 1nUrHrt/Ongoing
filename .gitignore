@@ -11,4 +11,5 @@ wheels/
 
 .vscode/
 .checkpoints/
-./heatmap/
+./graph/
+
