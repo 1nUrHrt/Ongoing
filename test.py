@@ -21,7 +21,8 @@ def test(config_class_name: str, config: Config):
     split_type = config.split_type
     node_dim = config.node_dim
     edge_dim = config.edge_dim
-    h_dim = config.h_dim
+    graph_dim = config.graph_dim
+    d_model = config.d_model
     heads = config.heads
     dp_r = config.dp_r
     seed = config.seed
@@ -61,11 +62,13 @@ def test(config_class_name: str, config: Config):
         shuffle=False,
     )
     encoder = getattr(model, encoder_type)
-    if encoder_type == "AttnEncoder":
-        encoder = encoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads).to(device)
+    if encoder_type == "AttnGINTFEncoder":
+        encoder = encoder(
+            node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
+        ).to(device)
     else:
-        encoder = encoder(node_dim, h_dim, block_num, dp_r, heads).to(device)
-    classifier = Classifier(h_dim, class_num, dp_r).to(device)
+        encoder = encoder(node_dim, d_model, block_num, dp_r).to(device)
+    classifier = Classifier(d_model, class_num, dp_r).to(device)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
     base_dir = os.path.join("./checkpoints", name)
     best_path = os.path.join(base_dir, "best.pt")

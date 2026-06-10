@@ -2,7 +2,7 @@ import argparse
 import logger_config
 from process_data import split_data
 from test import run_test
-from train import run_training, resume_training
+from train import run_training, resume_training,train_all
 
 
 def main():
@@ -17,7 +17,9 @@ def main():
 
     # ---- train_all ----
     p_train_all = sub.add_parser("train_all", help="Start a training run batch task")
-    p_train_all.add_argument("config", help="Config class name in config.py list")
+    p_train_all.add_argument(
+        "config", nargs="+", help="Config class name in config.py list"
+    )
 
     # ---- resume ----
     p_resume = sub.add_parser(
@@ -65,6 +67,8 @@ def main():
         run_training(config_class_name=args.config)
     elif args.command == "resume":
         resume_training(config_class_name=args.config)
+    elif args.command == "train_all":
+        train_all(args.config)
     elif args.command == "test":
         run_test(config_class_name=args.config)
     elif args.command == "split":

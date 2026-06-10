@@ -144,7 +144,8 @@ def train(
     epochs = config.epochs
     node_dim = config.node_dim
     edge_dim = config.edge_dim
-    h_dim = config.h_dim
+    graph_dim = config.graph_dim
+    d_model = config.d_model
     lr = config.lr
     heads = config.heads
     dp_r = config.dp_r
@@ -216,14 +217,16 @@ def train(
         shuffle=False,
     )
     encoder = getattr(model, encoder_type)
-    if encoder_type == "AttnEncoder":
-        encoder = encoder(node_dim, edge_dim, h_dim, block_num, dp_r, heads).to(device)
+    if encoder_type == "AttnGINTFEncoder":
+        encoder = encoder(
+            node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
+        ).to(device)
     else:
-        encoder = encoder(node_dim, h_dim, block_num, dp_r, heads).to(device)
+        encoder = encoder(node_dim, d_model, block_num, dp_r).to(device)
 
-    classifier = Classifier(h_dim, class_num, dp_r).to(device)
+    classifier = Classifier(d_model, class_num, dp_r).to(device)
     optimizer = Adam(list(encoder.parameters()) + list(classifier.parameters()), lr=lr)
-    scheduler = CosineAnnealingLR(optimizer, epochs // 2, eta_min=0.00001)
+    scheduler = CosineAnnealingLR(optimizer, epochs, eta_min=0.00001)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
     early_stop = EarlyStop(patience=10, mode="max", min_delta=0.001)
     scaler = torch.GradScaler() if torch.cuda.is_available() else None

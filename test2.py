@@ -2,11 +2,16 @@ import pandas as pd
 from rdkit import Chem
 import torch
 from collections import Counter
-from process_data import smiles_to_graph, load_data
-from config import gin_Cos_BM3
+from process_data import smiles_to_graph,DrugDataset,drug_collate_fn
+from torch.utils.data import DataLoader
 if __name__ == "__main__":
-    print(gin_Cos_BM3.encoder)
+    drug_set = DrugDataset(pd.read_csv("./data/drugbank-random-42/drug.csv"))
+    x = drug_set[62]
 
+    print(x.x,)
+    print(x.edge_index)
+    print(x.edge_attr)
+    print(x.graph_attr)
     # data = load_data()
     # if len(data) == 3:
     #     drug_set, train_itc, val_itc = data

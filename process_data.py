@@ -26,14 +26,12 @@ class Timer:
 
 
 class DrugDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, mask=None, add_global_features=False):
+    def __init__(self, df: pd.DataFrame, mask=None):
         self.drug = df
-        self.add_global_features = add_global_features
         n_drugs = len(df)
         logger.info(
-            "Building molecular graphs for %d drugs  |  add_global=%s",
+            "Building molecular graphs for %d drugs",
             n_drugs,
-            add_global_features,
         )
         if mask is not None:
             n_masked = mask.sum() if hasattr(mask, "sum") else len(mask)
@@ -440,7 +438,7 @@ def smiles_to_graph(smiles):
     o_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "O") / 10.0
     n_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "N") / 10.0
 
-    global_feats = [
+    graph_attr = [
         gw,
         logp,
         tpsa,
@@ -457,10 +455,8 @@ def smiles_to_graph(smiles):
         o_count,
         n_count,
     ]
-    global_feats = torch.tensor(global_feats, dtype=torch.float)
-    return Data(
-        x=x, edge_index=edge_index, edge_attr=edge_attr, global_features=global_feats
-    )
+    graph_attr = torch.tensor(graph_attr, dtype=torch.float).unsqueeze(0)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, graph_attr=graph_attr)
 
 
 def drug_collate_fn(batch):

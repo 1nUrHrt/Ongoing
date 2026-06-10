@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch_geometric.nn import (
-    MessagePassing,
     GINConv,
     global_mean_pool,
     global_max_pool,
@@ -11,84 +10,49 @@ from torch_geometric.utils import softmax, scatter
 from typing import Literal
 
 
-class AttnGIN(MessagePassing):
-    def __init__(self, node_feature, edge_feature, h_feature, dp_r, heads):
-        super().__init__(aggr="add")
-        self.node_feature = node_feature
-        self.edge_feature = edge_feature
-        self.h_feature = h_feature
+class AttnGIN(nn.Module):
+    def __init__(self, d_model, dp_r, heads):
+        super().__init__()
+        self.d_model = d_model
         self.dp_r = dp_r
         self.heads = heads
 
-        assert h_feature % heads == 0
-        self.head_dim = h_feature // heads
-
-        self.node_proj = (
-            nn.Linear(self.node_feature, self.h_feature)
-            if node_feature != h_feature
-            else nn.Identity()
+        assert d_model % heads == 0, (
+            f"d_model {d_model} must be divisible by heads {heads}"
         )
-        self.edge_proj = (
-            nn.Linear(self.edge_feature, self.h_feature)
-            if edge_feature != h_feature
-            else nn.Identity()
-        )
+        self.head_dim = d_model // heads
 
+        self.msg_proj = nn.Linear(d_model * 2, d_model)
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
         self.eps = nn.Parameter(torch.zeros(1), requires_grad=True)
-
-        self.msg_net = nn.Sequential(
-            nn.Linear(self.h_feature * 2, self.h_feature),
-            nn.GELU(),
-            nn.Linear(self.h_feature, self.h_feature),
-        )
-
-        self.attn_net = nn.Linear(self.h_feature * 3, self.heads)
-
         self.dropout = nn.Dropout(dp_r)
 
     def forward(self, x, edge_index, edge_attr):
-        x = self.node_proj(x)
-        edge_attr = self.edge_proj(edge_attr)
-        out = self.propagate(
-            edge_index,
-            x=x,
-            edge_attr=edge_attr,
-        )
-        out = (1 + self.eps) * x + out
-        return out
+        # E:edge num, M:model dim, H:head num, D:head dim, N:node num
+        x_j = x[edge_index[0]]  # E,M
+        x_i = x[edge_index[1]]  # E,M
+        msg_input = self.msg_proj(torch.cat([x_j, edge_attr], dim=-1))  # E,2M -> E,M
 
-    def message(self, x_i, x_j, edge_attr, edge_index_i):
-        tensors = [t for t in (x_j, edge_attr) if t is not None]
-        msg_input = torch.cat(tensors, dim=-1)
-        msg = self.msg_net(msg_input)
-        msg = msg.view(-1, self.heads, self.head_dim)
-
-        tensors = [t for t in (x_i, x_j, edge_attr) if t is not None]
-        attn_input = torch.cat(tensors, dim=-1)
-        attn_score = self.attn_net(attn_input)
-        alpha = softmax(attn_score, edge_index_i, dim=0)
+        q: torch.Tensor = self.q_proj(x_i).view(
+            -1, self.heads, self.head_dim
+        )  # E,M -> E,H,D
+        k: torch.Tensor = self.k_proj(msg_input).view(
+            -1, self.heads, self.head_dim
+        )  # E,M -> E,H,D
+        v: torch.Tensor = self.v_proj(msg_input).view(
+            -1, self.heads, self.head_dim
+        )  # E,M -> E,H,D
+        attn_score = torch.einsum("ehd,ehd->nh", q, k) / (self.head_dim**0.5)  # E,H,D
+        alpha = softmax(attn_score, edge_index[1], dim=0)
         alpha = self.dropout(alpha)
-        alpha = alpha.view(-1, self.heads, 1)
-        weighted_msg = msg * alpha
-        weighted_msg = weighted_msg.view(-1, self.h_feature)
-        return weighted_msg
-
-
-class AttnGINLayer(nn.Module):
-    def __init__(self, hidden_dim, dp_r, heads):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.heads = heads
-        self.dp_r = dp_r
-
-        self.attGIN = AttnGIN(hidden_dim, hidden_dim, hidden_dim, dp_r, heads)
-        self.LN = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(dp_r)
-
-    def forward(self, node, edge_index, edge_attr):
-        node = self.LN(node)
-        node = self.attGIN(node, edge_index, edge_attr)
-        return self.dropout(node)
+        weighted_v = torch.einsum("eh,ehd->nhd", alpha, v).view(
+            -1, self.d_model
+        )  # E,H,D -> E,M
+        out = scatter(weighted_v, edge_index[1], dim=0, reduce="sum")  # N,M
+        out = (1 + self.eps) * x + out  # N,M
+        return out
 
 
 class FFN(nn.Module):
@@ -110,91 +74,98 @@ class FFN(nn.Module):
         return self.w3(x)
 
 
-class FFNLayer(nn.Module):
-    def __init__(self, d_model: int = 256, d_ff: int | None = None, dp_r: float = 0.1):
+class AttnGINTransforemerLayer(nn.Module):
+    def __init__(self, d_model, dp_r, heads):
         super().__init__()
-        self.ffn = FFN(d_model, d_ff=d_ff, dp_r=dp_r)
-        self.LN = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dp_r)
-
-    def forward(self, x):
-        x = self.LN(x)
-        x = self.ffn(x)
-        return self.dropout(x)
-
-
-class Readout(nn.Module):
-    def __init__(self, in_features, heads, dp_r):
-        super().__init__()
-        self.in_features = in_features
-        self.dp_r = dp_r
-
-        assert in_features % heads == 0
-        self.heads = heads
-        self.head_dim = in_features // heads
-
-        self.attn_net = nn.Linear(in_features=in_features, out_features=self.heads)
-        self.dropout = nn.Dropout(self.dp_r)
-
-    def forward(self, nodes, index):
-        attn_input = nodes.view(-1, self.heads, self.head_dim)
-        attn_score = self.attn_net(nodes)
-        alpha = softmax(attn_score, index, dim=0)
-        alpha = self.dropout(alpha)
-        alpha = alpha.view(-1, self.heads, 1)
-        weighted_input = alpha * attn_input
-        weighted_input = weighted_input.view(-1, self.in_features)
-        graph_emb = scatter(weighted_input, index, dim=0, reduce="sum")
-        return graph_emb
-
-
-class ReadoutBlock(nn.Module):
-    def __init__(self, in_features, heads, dp_r):
-        super().__init__()
-        self.in_features = in_features
+        self.d_model = d_model
         self.heads = heads
         self.dp_r = dp_r
 
-        self.LN = nn.LayerNorm(in_features)
-        self.Readout = Readout(in_features=in_features, heads=heads, dp_r=dp_r)
-        self.BN = nn.BatchNorm1d(in_features)
-        self.ffn = FFN(d_model=in_features, dp_r=dp_r)
-        self.dropout = nn.Dropout(self.dp_r)
+        self.LN_e = nn.LayerNorm(d_model)
+        self.LN_n = nn.LayerNorm(d_model)
+        self.attGIN = AttnGIN(d_model, dp_r, heads)
+        self.dropout_a = nn.Dropout(dp_r)
 
-    def forward(self, x, index):
-        h = self.LN(x)
-        x = self.Readout(h, index)
-
-        h = self.BN(x)
-        h = self.ffn(h)
-        h = self.dropout(h)
-        return h + x
-
-
-class TransformerLayer(nn.Module):
-    def __init__(self, hidden_dim: int, dp_r: float, heads: int):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.heads = heads
-        self.dp_r = dp_r
-
-        self.attn_GIN = AttnGINLayer(hidden_dim, dp_r=dp_r, heads=heads)
-
-        self.ffn = FFNLayer(hidden_dim, dp_r=dp_r)
+        self.LN_f = nn.LayerNorm(d_model)
+        self.ffn = FFN(d_model, dp_r=dp_r)
+        self.dropout_f = nn.Dropout(dp_r)
 
     def forward(self, node, edge_index, edge_attr):
-        h = self.attn_GIN(node, edge_index, edge_attr)
-        node = h + node
-        h = self.ffn(node)
-        return h + node
+        node = self.LN_n(node)
+        edge_attr = self.LN_e(edge_attr)
+        h = self.attGIN(node, edge_index, edge_attr)
+        h = self.dropout_a(h)
+        node = node + h
+        h = self.LN_f(node)
+        h = self.ffn(h)
+        h = self.dropout_f(h)
+        return node + h
 
 
-class AttnEncoder(nn.Module):
+class AttnReadout(nn.Module):
+    def __init__(self, d_model, heads, dp_r):
+        super().__init__()
+        self.d_model = d_model
+        self.dp_r = dp_r
+
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.heads = heads
+        assert d_model % heads == 0, (
+            f"d_model {d_model} must be divisible by heads {heads}"
+        )
+        self.head_dim = d_model // heads
+        self.dropout = nn.Dropout(self.dp_r)
+
+    def forward(self, node, batch_index, graph_attr):
+        # N:node num, B:batch size, M:model dim, H:head num, D:head dim
+        q: torch.Tensor = self.q_proj(graph_attr[batch_index]).view(
+            -1, self.heads, self.head_dim
+        )  # N,H,D
+        k: torch.Tensor = self.k_proj(node).view(-1, self.heads, self.head_dim)  # N,H,D
+        v: torch.Tensor = self.v_proj(node).view(-1, self.heads, self.head_dim)  # N,H,D
+        attn_score = torch.einsum("nhd,nhd->nh", q, k) / (self.head_dim**0.5)  # N,H
+        alpha = softmax(attn_score, batch_index, dim=0)  # N,H
+        alpha = self.dropout(alpha)  # N,H
+        weighted_v = torch.einsum("nh,nhd->nhd", alpha, v).view(-1, self.d_model)  # N,M
+        return scatter(weighted_v, batch_index, dim=0, reduce="sum")  # B,M
+
+
+class AttnReadoutTransformerLayer(nn.Module):
+    def __init__(self, d_model, heads, dp_r):
+        super().__init__()
+        self.d_model = d_model
+        self.heads = heads
+        self.dp_r = dp_r
+
+        self.LN_n = nn.LayerNorm(d_model)
+        self.LN_g = nn.LayerNorm(d_model)
+        self.Readout = AttnReadout(d_model, heads, dp_r)
+        self.dropout_r = nn.Dropout(self.dp_r)
+        self.LN_f = nn.LayerNorm(d_model)
+        self.ffn = FFN(d_model=d_model, dp_r=dp_r)
+        self.dropout_f = nn.Dropout(self.dp_r)
+
+    def forward(self, node, batch_index, graph_attr):
+        h_n = self.LN_n(node)
+        h_g = self.LN_g(graph_attr)
+        h = self.Readout(h_n, batch_index, h_g)
+        h = self.dropout_r(h)
+        graph_attr = graph_attr + h
+        h = self.LN_f(graph_attr)
+        h = self.ffn(h)
+        h = self.dropout_f(h)
+        return h + graph_attr
+
+
+class AttnGINTFEncoder(nn.Module):
     def __init__(
         self,
         node_dim: int,
         edge_dim: int,
-        h_dim: int,
+        graph_dim: int,
+        d_model: int,
         block_num: int,
         dp_r: float,
         heads: int,
@@ -202,38 +173,49 @@ class AttnEncoder(nn.Module):
         super().__init__()
         self.node_dim = node_dim
         self.edge_dim = edge_dim
-        self.h_dim = h_dim
+        self.graph_dim = graph_dim
+        self.d_model = d_model
         self.block_num = block_num
         self.heads = heads
         self.dp_r = dp_r
 
         self.node_proj = (
-            nn.Linear(node_dim, h_dim) if node_dim != h_dim else nn.Identity()
+            nn.Linear(node_dim, d_model) if node_dim != d_model else nn.Identity()
         )
         self.edge_proj = (
-            nn.Linear(edge_dim, h_dim) if edge_dim != h_dim else nn.Identity()
+            nn.Linear(edge_dim, d_model) if edge_dim != d_model else nn.Identity()
+        )
+        self.graph_proj = (
+            nn.Linear(graph_dim, d_model) if graph_dim != d_model else nn.Identity()
         )
 
-        self.transformer_layer_list = nn.ModuleList(
-            [TransformerLayer(h_dim, dp_r=dp_r, heads=heads) for _ in range(block_num)]
+        self.attn_gin_tfl_list = nn.ModuleList(
+            [
+                AttnGINTransforemerLayer(d_model, dp_r=dp_r, heads=heads)
+                for _ in range(block_num)
+            ]
         )
 
-        self.readout = ReadoutBlock(in_features=h_dim, dp_r=dp_r, heads=heads)
+        self.attn_readout_tfl = AttnReadoutTransformerLayer(
+            d_model, dp_r=dp_r, heads=heads
+        )
 
     def forward(self, batch_data):
-        nodes, edge_index, edge_attr, index = (
+        node, edge_index, edge_attr, index, graph_attr = (
             batch_data.x,
             batch_data.edge_index,
             batch_data.edge_attr,
             batch_data.batch,
+            batch_data.graph_attr,
         )
-        nodes = self.node_proj(nodes)
+        node = self.node_proj(node)
         edge_attr = self.edge_proj(edge_attr)
+        graph_attr = self.graph_proj(graph_attr)
 
-        for encoder in self.transformer_layer_list:
-            nodes = encoder(nodes, edge_index, edge_attr)
+        for layer in self.attn_gin_tfl_list:
+            node = layer(node, edge_index, edge_attr)
 
-        return self.readout(nodes, index)
+        return self.attn_readout_tfl(node, index, graph_attr)
 
 
 class Classifier(nn.Module):
@@ -328,39 +310,61 @@ class EarlyStop:
         self.early_stop = state_dict["early_stop"]
 
 
-class GINEncoder(nn.Module):
-    def __init__(self, in_features, h_features, block_num, dp_r, heads):
+class GIN(nn.Module):
+    def __init__(self, d_model, dp_r):
         super().__init__()
+        self.d_model = d_model
+        self.dp_r = dp_r
+        mlp = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.LN = nn.LayerNorm(d_model)
+        self.gin = GINConv(mlp, train_eps=True)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dp_r)
+
+    def forward(self, node, edge_index):
+        h = self.LN(node)
+        h = self.gin(node, edge_index)
+        h = self.dropout(self.act(h))
+        node = node + h
+
+
+class GINEncoder(nn.Module):
+    def __init__(self, node_dim, d_model, block_num, dp_r):
+        super().__init__()
+        self.node_dim = node_dim
+        self.d_model = d_model
+        self.block_num = block_num
         self.dp_r = dp_r
         self.proj = (
-            nn.Linear(in_features, h_features)
-            if in_features != h_features
-            else nn.Identity()
+            nn.Linear(node_dim, d_model) if node_dim != d_model else nn.Identity()
         )
         self.gin_list = nn.ModuleList()
         for _ in range(block_num):
-            mlp = nn.Sequential(
-                nn.Linear(h_features, h_features),
-                nn.ReLU(),
-                nn.Linear(h_features, h_features),
-            )
-            self.gin_list.append(GINConv(mlp, train_eps=True))
+            self.gin_list.append(GIN(d_model, dp_r))
+
+        self.readout_proj = nn.Linear(d_model * 2, d_model)
+        self.act = nn.ReLU()
+        self.readout = nn.Linear(d_model, d_model)
 
     def forward(self, batch_data):
-        nodes, edge_index, index = (
+        node, edge_index, index = (
             batch_data.x,
             batch_data.edge_index,
             batch_data.batch,
         )
-        nodes = self.proj(nodes)
+        node = self.proj(node)
         for layer in self.gin_list:
-            h = layer(nodes, edge_index)
-            h = F.relu(h)
-            h = F.dropout(h, p=self.dp_r, training=self.training)
-            nodes = h + nodes
-        return torch.cat(
-            [global_mean_pool(nodes, index), global_max_pool(nodes, index)], dim=1
+            node = layer(node, edge_index)
+        out = torch.cat(
+            [global_mean_pool(node, index), global_max_pool(node, index)], dim=-11
         )
+        out = self.readout_proj(out)
+        out = self.act(out)
+        return self.readout(out)
 
 
-__all__ = ["AttnEncoder", "Classifier", "EarlyStop", "GINEncoder"]
+__all__ = ["AttnGINTFEncoder", "Classifier", "EarlyStop", "GINEncoder"]
