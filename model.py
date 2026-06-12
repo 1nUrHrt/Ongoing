@@ -312,7 +312,7 @@ class GIN(nn.Module):
             nn.Linear(d_model, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model),
-            nn.Dropout(dp_r)
+            nn.Dropout(dp_r),
         )
         self.LN = nn.LayerNorm(d_model)
         self.gin = GINConv(mlp, train_eps=False)
@@ -359,8 +359,6 @@ class GINEncoder(nn.Module):
         return self.readout(out)
 
 
-
-
 class Config:
     _required_fields = {
         "data_source",
@@ -378,10 +376,10 @@ class Config:
         "block_num",
         "class_num",
         "drug_batch_size",
-        "classifer"
+        "classifier",
         "itc_batch_size",
         "label_smoothing",
-        "weight_decay"
+        "weight_decay",
     }
     classifier: ClassVar[Literal["BClassifier", "MClassifier"]]
     data_source: ClassVar[Literal["drugbank", "twosides"]]
@@ -401,13 +399,16 @@ class Config:
     drug_batch_size: ClassVar[int]
     itc_batch_size: ClassVar[int]
     label_smoothing: ClassVar[float]
-    weight_decay:ClassVar[float]
+    weight_decay: ClassVar[float]
+
     @classmethod
     def __init_subclass__(cls):
         for field in cls._required_fields:
             if field not in cls.__dict__:
+                print(field)
                 raise NotImplementedError(
                     f"Subclass {cls.__name__} must explicitly set attribute: {field}"
                 )
 
-__all__ = ["AttnGINTFEncoder", "Classifier", "EarlyStop", "GINEncoder","Config"]
+
+__all__ = ["AttnGINTFEncoder", "Classifier", "EarlyStop", "GINEncoder", "Config"]

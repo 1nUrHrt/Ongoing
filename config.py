@@ -15,7 +15,7 @@ class attn_gin_tf_B5(Config):
     dp_r = 0.1
     train_size = 0.8
     seed = 42
-    block_num = 10
+    block_num = 5
     class_num = 86
     drug_batch_size = 2048
     itc_batch_size = 20480
@@ -37,7 +37,7 @@ class attn_gin_tf_B8(Config):
     dp_r = 0.1
     train_size = 0.8
     seed = 42
-    block_num = 10
+    block_num = 8
     class_num = 86
     drug_batch_size = 2048
     itc_batch_size = 20480

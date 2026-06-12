@@ -89,7 +89,7 @@ def load_data(
     type: Literal["train", "val", "test"] = "train",
     seed=42,
 ):
-    base_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
+    base_dir = os.path.join("./split_data", data_source + "-" + split_type + "-" + str(seed))
     return _load_data(base_dir, type)
 
 
@@ -99,7 +99,7 @@ def split_data(
     train_size=0.8,
     seed=42,
 ):
-    save_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
+    save_dir = os.path.join("./split_data", data_source + "-" + split_type + "-" + str(seed))
     os.makedirs(save_dir, exist_ok=True)
     if data_source == "drugbank":
         if split_type == "random":
@@ -148,7 +148,7 @@ def _split_drugbank_random(df: pd.DataFrame, train_size, seed, save_dir):
     test["ID1"] = test["ID1"].map(test_map)
     test["ID2"] = test["ID2"].map(test_map)
     test_drug = test_drug.map(id_map)
-
+    os.makedirs(save_dir,exist_ok=True)
     train_drug.name = "smile"
     train_drug.to_csv(
         os.path.join(save_dir, "train_drug.csv"),
