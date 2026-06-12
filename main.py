@@ -65,7 +65,7 @@ def main():
     if args.command == "train":
         run_training(config_class_name=args.config)
     elif args.command == "train_all":
-        run_training(args.configs)
+        run_all(args.configs)
     elif args.command == "resume":
         resume_training(config_class_name=args.config)
     elif args.command == "test":
