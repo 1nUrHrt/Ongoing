@@ -213,7 +213,7 @@ def _train(
             "resume": "False",
             "early_stop": f"0/{early_stop.patience}",
             "encoder": type(encoder).__name__,
-            "decoder": "classifer",
+            "classifer": "classifer",
             "data_source": data_source,
             "split_type": split_type,
             "device": device,
