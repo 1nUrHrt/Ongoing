@@ -5,13 +5,17 @@ from collections import Counter
 from process_data import smiles_to_graph,DrugDataset,drug_collate_fn
 from torch.utils.data import DataLoader
 if __name__ == "__main__":
-    drug_set = DrugDataset(pd.read_csv("./data/drugbank-random-42/drug.csv"))
-    x = drug_set[62]
 
-    print(x.x,)
-    print(x.edge_index)
-    print(x.edge_attr)
-    print(x.graph_attr)
+
+    d =pd.read_csv("./checkpoints/attn_gin_tf_de2/result.csv")
+    print(d)
+    # drug_set = DrugDataset(pd.read_csv("./data/drugbank-random-42/drug.csv"))
+    # x = drug_set[62]
+
+    # print(x.x,)
+    # print(x.edge_index)
+    # print(x.edge_attr)
+    # print(x.graph_attr)
     # data = load_data()
     # if len(data) == 3:
     #     drug_set, train_itc, val_itc = data

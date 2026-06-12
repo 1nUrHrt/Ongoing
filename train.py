@@ -2,24 +2,21 @@ import os
 import random
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn import CrossEntropyLoss
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from process_data import Timer, load_data, drug_collate_fn, itc_collate_fn
-import model
-from model import EarlyStop, Classifier
+from torch.utils.data import DataLoader, random_split
+from process_data import Timer, load_data, itc_collate_fn, drug_collate_fn
+from model import EarlyStop, Classifier, AttnGINTFEncoder
 from typing import List
 import config
 from config import Config
-import logging
-
-logger = logging.getLogger("train")
+from custom_printer import train_ptr as ptr, ptr_color
 
 
-def train_one_epoch(
+def _train_one_epoch(
     encoder,
     classifier,
     drug_loader,
@@ -65,24 +62,16 @@ def train_one_epoch(
 
         train_loss += loss.item()
         train_acc += acc.item()
-        print(
-            f"\r[Train] [Batch:{batch_counter}/{total_batch}] loss:{loss.item():.5f},acc:{acc.item():.5f}",
-            end="",
-            flush=True,
+        ptr.w_flush(
+            "train",
+            f"[Batch:{batch_counter}/{total_batch}] loss:{loss.item():.5f},acc:{acc.item():.5f}",
         )
-    print()
     avg_train_loss = train_loss / len(itc_loader)
     avg_train_acc = train_acc / len(itc_loader)
-    logger.info(
-        "Epoch train done  |  avg_loss=%.5f  avg_acc=%.5f  (%d batches)",
-        avg_train_loss,
-        avg_train_acc,
-        total_batch,
-    )
     return avg_train_loss, avg_train_acc
 
 
-def val_one_epoch(
+def _val_one_epoch(
     encoder,
     classifier,
     drug_loader,
@@ -122,23 +111,15 @@ def val_one_epoch(
     f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
     auc = roc_auc_score(all_labels, all_probs, multi_class="ovr", average="macro")
     cm = confusion_matrix(all_labels, all_preds)
-    logger.info(
-        "Validation done  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f",
-        avg_loss,
-        acc,
-        f1,
-        auc,
-    )
     return (avg_loss, acc, f1, auc, cm)
 
 
-def train(
-    config_class_name: str,
+def _train(
     config: Config,
     history=None,
 ):
-    name = config_class_name
-    encoder_type = config.encoder
+    name = type(config).__name__
+    clssifier_type = config.classifier
     data_source = config.data_source
     split_type = config.split_type
     epochs = config.epochs
@@ -150,6 +131,7 @@ def train(
     heads = config.heads
     dp_r = config.dp_r
     train_size = config.train_size
+    weight_decay = config.weight_decay
     seed = config.seed
     block_num = config.block_num
     class_num = config.class_num
@@ -171,15 +153,6 @@ def train(
     # pin_memory = True if torch.cuda.is_available() else False
     pin_memory = False
 
-    logger.info(
-        "Train config | epochs=%d  encoder=%s  data_source=%s  split_type=%s  device=%s  seed=%d",
-        epochs,
-        encoder_type,
-        data_source,
-        split_type,
-        device,
-        seed,
-    )
     base_dir = os.path.join("./checkpoints", name)
     os.makedirs(base_dir, exist_ok=True)
     best_path = os.path.join(base_dir, "best.pt")
@@ -187,10 +160,8 @@ def train(
     result_path = os.path.join(base_dir, "result.csv")
     cm_path = os.path.join(base_dir, "confusion_matrix.csv")
 
-    drug_set, train_itc, val_itc, _, _ = load_data(
-        data_source, split_type, train_size, seed
-    )
-    assert drug_set is not None and train_itc is not None and val_itc is not None
+    drug_set, itc_set = load_data(data_source, split_type, "train", seed)
+    train_itc, val_itc = random_split(itc_set, [train_size, 1 - train_size])
     drug_loader = DataLoader(
         drug_set,
         collate_fn=drug_collate_fn,
@@ -217,20 +188,39 @@ def train(
         num_workers=2,
         shuffle=False,
     )
-    encoder = getattr(model, encoder_type)
-    if encoder_type == "AttnGINTFEncoder":
-        encoder = encoder(
-            node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
-        ).to(device)
-    else:
-        encoder = encoder(node_dim, d_model, block_num, dp_r).to(device)
+
+    encoder = AttnGINTFEncoder(
+        node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
+    ).to(device)
 
     classifier = Classifier(d_model, class_num, dp_r).to(device)
-    optimizer = Adam(list(encoder.parameters()) + list(classifier.parameters()), lr=lr)
+    optimizer = AdamW(
+        list(encoder.parameters()) + list(classifier.parameters()),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
     scheduler = CosineAnnealingLR(optimizer, epochs, eta_min=0.00001)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
     early_stop = EarlyStop(patience=10, mode="max", min_delta=0.001)
     scaler = torch.GradScaler() if torch.cuda.is_available() else None
+
+    ptr.set_value_batch(
+        {
+            "name": name,
+            "epochs": epochs,
+            "epoch": f"0/{epochs}",
+            "lr": lr,
+            "resume": "False",
+            "early_stop": f"0/{early_stop.patience}",
+            "encoder": type(encoder).__name__,
+            "decoder": "classifer",
+            "data_source": data_source,
+            "split_type": split_type,
+            "device": device,
+            "seed": seed,
+            "state": "initing",
+        }
+    )
 
     result = {
         "train_loss": [],
@@ -267,33 +257,48 @@ def train(
         torch.random.set_rng_state(history["torch_random"])
         np.random.set_state(history["numpy_random"])
         random.setstate(history["python_random"])
-        logger.info("Resume checkpoint loaded  |  epoch=%d", start_epoch)
-
-    if early_stop.early_stop:
-        logger.info(
-            "Early stop already triggered at epoch %d/%d — nothing to resume",
-            start_epoch,
-            epochs,
+        ptr.write(
+            "epoch",
+            f"{start_epoch}/{epochs}",
         )
+        ptr.write(
+            "resume",
+            "True",
+        )
+        ptr.w_flush(
+            "current_lr", f"{optimizer.param_groups[0]['lr']:.7f}", ptr_color.green
+        )
+    if early_stop.early_stop:
+        ptr.scroll(
+            "info",
+            f"Early stop already triggered at epoch {start_epoch}/{epochs} — nothing to resume",
+        )
+        ptr.write(
+            "early_stop",
+            f"{early_stop.counter}/{early_stop.patience}",
+            ptr_color.error,
+        )
+        ptr.w_flush("state", "finished", ptr_color.done)
         return
 
     if start_epoch >= epochs:
-        logger.info(
-            "Experiment already finished at epoch %d/%d — nothing to resume",
-            start_epoch,
-            epochs,
+        ptr.scroll(
+            "info",
+            f"Experiment already finished at epoch {start_epoch}/{epochs} — nothing to resume",
         )
+        ptr.w_flush("state", "finished", ptr_color.done)
         return
 
     if history is not None and history["result"] is not None:
         df = pd.read_csv(result_path)
         result = df.to_dict(orient="list")
         total_timer = sum(result["train_timer"]) + sum(result["val_timer"])
-
     for epoch in range(start_epoch, epochs):
         current_epoch = epoch + 1
+        ptr.w_flush("epoch", f"{current_epoch}/{epochs}")
         with Timer() as timer:
-            train_loss, train_acc = train_one_epoch(
+            ptr.w_flush("state", "training", ptr_color.training)
+            train_loss, train_acc = _train_one_epoch(
                 encoder,
                 classifier,
                 drug_loader,
@@ -303,13 +308,9 @@ def train(
                 device,
                 scaler,
             )
-        logger.info(
-            "Epoch %d/%d  |  train loss=%.5f  acc=%.5f  (%.2fs)",
-            current_epoch,
-            epochs,
-            train_loss,
-            train_acc,
-            timer.elapsed,
+        ptr.w_flush(
+            "train",
+            f"loss={train_loss:.5f}  acc={train_acc:.5f}  ({timer.elapsed:.5f} s)",
         )
         total_timer += timer.elapsed
         result["train_loss"].append(train_loss)
@@ -317,7 +318,8 @@ def train(
         result["train_timer"].append(timer.elapsed)
 
         with Timer() as timer:
-            val_loss, val_acc, val_f1_score, val_auc, cm = val_one_epoch(
+            ptr.w_flush("state", "valdating", ptr_color.validating)
+            val_loss, val_acc, val_f1_score, val_auc, cm = _val_one_epoch(
                 encoder,
                 classifier,
                 drug_loader,
@@ -326,15 +328,9 @@ def train(
                 device,
             )
 
-        logger.info(
-            "Epoch %d/%d  |  val  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f  (%.2fs)",
-            current_epoch,
-            epochs,
-            val_loss,
-            val_acc,
-            val_f1_score,
-            val_auc,
-            timer.elapsed,
+        ptr.w_flush(
+            "val",
+            f"loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1_score:.5f}  auc={val_auc:.5f}  ({timer.elapsed:.5f} s)",
         )
         total_timer += timer.elapsed
         result["val_loss"].append(val_loss)
@@ -342,10 +338,11 @@ def train(
         result["val_f1_score"].append(val_f1_score)
         result["val_auc"].append(val_auc)
         result["val_timer"].append(timer.elapsed)
-
+        
         scheduler.step()
         is_improved = early_stop(val_f1_score)
-
+        ptr.write("state", "waiting", ptr_color.pending)
+        ptr.w_flush("current_lr", f"{optimizer.param_groups[0]['lr']:.7f}")
         if is_improved:
             torch.save(
                 {
@@ -361,18 +358,19 @@ def train(
                 columns=[f"Pred_{i}" for i in range(class_num)],
             )
             cm_df.to_csv(cm_path)
-            logger.info(
-                "Epoch %d/%d  |  best model improved → saved best.pt",
-                current_epoch,
-                epochs,
+            ptr.write(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+            )
+            ptr.scl_flush(
+                "info",
+                "best model improved → saved best.pt and confusion_matrix.csv",
             )
         else:
-            logger.info(
-                "Epoch %d/%d  |  no improvement  (%d/%d patience)",
-                current_epoch,
-                epochs,
-                early_stop.counter,
-                early_stop.patience,
+            ptr.w_flush(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+                ptr_color.warning,
             )
 
         checkpoint = {
@@ -395,57 +393,34 @@ def train(
         if current_epoch % 5 == 0:
             torch.save(checkpoint, history_path)
             pd.DataFrame(result).to_csv(result_path, index=False)
-            logger.info(
-                "Epoch %d/%d  |  checkpoint saved (history.pt + result.csv)",
-                current_epoch,
-                epochs,
+            ptr.scl_flush(
+                "info",
+                "checkpoint saved (history.pt + result.csv)",
             )
-
-        logger.info(
-            "Epoch %d/%d  |  cumulative time: %.2fs",
-            current_epoch,
-            epochs,
-            total_timer,
-        )
 
         if early_stop.early_stop:
-            logger.info(
-                "Epoch %d/%d  |  early stop triggered",
-                current_epoch,
-                epochs,
+            ptr.write(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+                ptr_color.error,
             )
+            ptr.w_flush("state", "finished", ptr_color.done)
             break
 
 
 def resume_training(config_class_name: str):
-    cfg: Config
-    try:
-        cfg = getattr(config, config_class_name)
-    except AttributeError:
-        logger.warning("Config '%s' not found in config.py", config_class_name)
-        return
-    history_path = os.path.join("./checkpoints", config_class_name, "history.pt")
-    result_path = os.path.join("./checkpoints", config_class_name, "history.pt")
-    if not os.path.exists(history_path) or not os.path.exists(result_path):
-        logger.warning(
-            "history.pt or result.csv not found for config %s,resume_training failed ",
-            config_class_name,
-        )
-        return
+    cfg = getattr(config, config_class_name)
+    history_path = os.path.join("./checkpoints", type(cfg).__name__, "history.pt")
+    result_path = os.path.join("./checkpoints", type(cfg).__name__, "result.csv")
     history = torch.load(history_path, weights_only=False)
     result = pd.read_csv(result_path)
     history["result"] = result
-    train(config_class_name, cfg, history=history)
+    _train(cfg, history=history)
 
 
 def run_training(config_class_name: str):
-    cfg: Config
-    try:
-        cfg = getattr(config, config_class_name)
-    except AttributeError:
-        logger.warning("Config '%s' not found in config.py", config_class_name)
-        return
-    train(config_class_name, cfg)
+    cfg = getattr(config, config_class_name)
+    _train(cfg)
 
 
 def train_all(config_class_name_arr: List[str]):
@@ -453,4 +428,4 @@ def train_all(config_class_name_arr: List[str]):
         run_training(name)
 
 
-__all__ = ["resume_training", "run_training"]
+__all__ = ["resume_training", "run_training", "train_all"]

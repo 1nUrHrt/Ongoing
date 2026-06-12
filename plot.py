@@ -27,13 +27,13 @@ def heatmap(file_name: str):
 
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, "cm.png"), dpi=150)
+    plt.clf()
 
 
 def line_chart(file_name: str):
     out_dir = os.path.join("./graph", file_name)
     os.makedirs(out_dir, exist_ok=True)
     df = pd.read_csv(f"./checkpoints/{file_name}/result.csv")
-    print(df.columns)
 
     fig_type = {
         "Loss": ["train_loss", "val_loss"],
@@ -58,7 +58,7 @@ def line_chart(file_name: str):
 
 
 if __name__ == "__main__":
-    file_names = ["attn_gin_tf"]
+    file_names = ["attn_gin_tf_de","gin","attn_gin_tf_de2"]
     for i in file_names:
         line_chart(i)
         heatmap(i)

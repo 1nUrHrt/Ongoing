@@ -6,7 +6,7 @@ from torch_geometric.nn import (
     global_max_pool,
 )
 from torch_geometric.utils import softmax, scatter
-from typing import Literal
+from typing import ClassVar, Literal
 
 
 class AttnGIN(nn.Module):
@@ -261,10 +261,6 @@ class EarlyStop:
         mode: Literal["max", "min"] = "max",
         min_delta: float = 1e-4,
     ):
-        if not isinstance(patience, int) or patience <= 0:
-            raise ValueError(f"patience must be a positive integer, got {patience}")
-        if mode not in ["max", "min"]:
-            raise ValueError(f"mode must be either 'max' or 'min', got {mode}")
         self.patience = patience
         self.mode = mode
 
@@ -363,4 +359,55 @@ class GINEncoder(nn.Module):
         return self.readout(out)
 
 
-__all__ = ["AttnGINTFEncoder", "Classifier", "EarlyStop", "GINEncoder"]
+
+
+class Config:
+    _required_fields = {
+        "data_source",
+        "split_type",
+        "epochs",
+        "node_dim",
+        "edge_dim",
+        "graph_dim",
+        "d_model",
+        "lr",
+        "heads",
+        "dp_r",
+        "train_size",
+        "seed",
+        "block_num",
+        "class_num",
+        "drug_batch_size",
+        "classifer"
+        "itc_batch_size",
+        "label_smoothing",
+        "weight_decay"
+    }
+    classifier: ClassVar[Literal["BClassifier", "MClassifier"]]
+    data_source: ClassVar[Literal["drugbank", "twosides"]]
+    split_type: ClassVar[Literal["random", "cluster"]]
+    epochs: ClassVar[int]
+    node_dim: ClassVar[int]
+    edge_dim: ClassVar[int]
+    graph_dim: ClassVar[int]
+    d_model: ClassVar[int]
+    lr: ClassVar[float]
+    heads: ClassVar[int]
+    dp_r: ClassVar[float]
+    train_size: ClassVar[float]
+    seed: ClassVar[int]
+    block_num: ClassVar[int]
+    class_num: ClassVar[int]
+    drug_batch_size: ClassVar[int]
+    itc_batch_size: ClassVar[int]
+    label_smoothing: ClassVar[float]
+    weight_decay:ClassVar[float]
+    @classmethod
+    def __init_subclass__(cls):
+        for field in cls._required_fields:
+            if field not in cls.__dict__:
+                raise NotImplementedError(
+                    f"Subclass {cls.__name__} must explicitly set attribute: {field}"
+                )
+
+__all__ = ["AttnGINTFEncoder", "Classifier", "EarlyStop", "GINEncoder","Config"]

@@ -1,6 +1,4 @@
-import math
 import os.path
-import logging
 from typing import Literal
 import pandas as pd
 from torch.utils.data import Dataset
@@ -8,11 +6,8 @@ from sklearn.model_selection import train_test_split
 import torch
 from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors, AllChem, ValenceType
-
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Data, InMemoryDataset, Batch
 import time
-
-logger = logging.getLogger("data")
 
 
 class Timer:
@@ -25,61 +20,55 @@ class Timer:
         self.elapsed = self.end - self.start
 
 
-class DrugDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, mask=None):
-        self.drug = df
-        n_drugs = len(df)
-        logger.info(
-            "Building molecular graphs for %d drugs",
-            n_drugs,
-        )
-        if mask is not None:
-            n_masked = mask.sum() if hasattr(mask, "sum") else len(mask)
-            self.drug.loc[mask, "mol"] = self.drug.loc[mask, "smile"].map(
-                lambda s: smiles_to_graph(s)
-            )
-            logger.info("Graphs computed for %d/%d drugs (masked)", n_masked, n_drugs)
-        else:
-            self.drug["mol"] = self.drug["smile"].map(lambda s: smiles_to_graph(s))
-            logger.info("Graphs computed for all %d drugs", n_drugs)
+class DrugDataset(InMemoryDataset):
+    def __init__(
+        self,
+        root,
+        type: Literal["train", "val", "test"] = "train",
+        transform=None,
+        pre_transform=None,
+    ):
+        self.file_path = f"{type}_drug.csv"
+        self.proc_name = f"{type}.pt"
+        super().__init__(root, transform, pre_transform)
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
-    def __len__(self):
-        return len(self.drug)
+    @property
+    def processed_file_names(self):
+        return [self.proc_name]
 
-    def __getitem__(self, idx):
-        return self.drug.loc[idx, "mol"]
+    @property
+    def raw_file_names(self):
+        return []
 
+    def download(self):
+        pass
 
-class SubDrugDataset(Dataset):
-    def __init__(self, indices: pd.Series, drug_dataset: DrugDataset):
-        self.indices = indices
-        self.drug_dataset = drug_dataset
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        return self.drug_dataset[self.indices[idx]]
-
-    def drug_collate_fn(self, batch):
-        return Batch.from_data_list(batch)
+    def process(self):
+        df = pd.read_csv(os.path.join(self.root, self.file_path))
+        data_list = []
+        for smile in df["smile"]:
+            mol = smiles_to_graph(smile)
+            data_list.append(mol)
+        self.data, self.slices = self.collate(data_list)
+        torch.save((self.data, self.slices), self.processed_paths[0])
 
 
 class InteractionDataset(Dataset):
-    def __init__(self, itc: pd.DataFrame):
+    def __init__(self, root, type: Literal["train", "val", "test"] = "train"):
         super().__init__()
-        self.itc = itc
+        self.itc = pd.read_csv(os.path.join(root, f"{type}_itc.csv"))
 
     def __len__(self):
         return len(self.itc)
 
-    @property
-    def scenario(self):
-        return self.itc["scenario"].drop_duplicates(keep="first").reset_index(drop=True)
+    # @property
+    # def scenario(self):
+    #     return self.itc["scenario"].drop_duplicates(keep="first").reset_index(drop=True)
 
-    @property
-    def scenario_label(self):
-        return self.itc["scenario"]
+    # @property
+    # def scenario_label(self):
+    #     return self.itc["scenario"]
 
     def __getitem__(self, idx):
 
@@ -90,57 +79,18 @@ class InteractionDataset(Dataset):
         return self.itc["label"]
 
 
-def _load_data(all_drug_path: str, itc_path: str):
-    all_drug = pd.read_csv(all_drug_path)
-    itc = pd.read_csv(itc_path)
-    sub_drug = (
-        pd.concat([itc["drug1"], itc["drug2"]])
-        .drop_duplicates(keep="first")
-        .reset_index(drop=True)
-    )
-    sub_drug_map = {key: i for i, key in enumerate(sub_drug)}
-    itc["drug1"] = itc["drug1"].map(sub_drug_map)
-    itc["drug2"] = itc["drug2"].map(sub_drug_map)
-    sub_drug_ids = set(sub_drug.values)
-    mask = [i in sub_drug_ids for i in range(len(all_drug))]
-
-    all_drug_set = DrugDataset(all_drug, mask=mask)
-    return SubDrugDataset(sub_drug, all_drug_set), itc
+def _load_data(root: str, type: Literal["train", "val", "test"] = "train"):
+    return DrugDataset(root, type), InteractionDataset(root, type)
 
 
 def load_data(
     data_source: Literal["drugbank", "twosides"],
     split_type: Literal["random", "cluster"],
-    train_size: float | None,
+    type: Literal["train", "val", "test"] = "train",
     seed=42,
 ):
     base_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
-    all_drug_path = os.path.join(base_dir, "drug.csv")
-    if train_size is not None:
-        sub_train_drug, train_itc = _load_data(
-            all_drug_path, os.path.join(base_dir, "train.csv")
-        )
-        train_itc, valid_itc = train_test_split(
-            train_itc,
-            train_size=train_size,
-            random_state=seed,
-            stratify=train_itc["label"],
-        )
-        train_itc = train_itc.reset_index(drop=True)
-        valid_itc = valid_itc.reset_index(drop=True)
-        return (
-            sub_train_drug,
-            InteractionDataset(train_itc),
-            InteractionDataset(valid_itc),
-            None,
-            None,
-        )
-
-    sub_test_drug, test_itc = _load_data(
-        all_drug_path, os.path.join(base_dir, "test.csv")
-    )
-
-    return None, None, None, sub_test_drug, InteractionDataset(test_itc)
+    return _load_data(base_dir, type)
 
 
 def split_data(
@@ -151,81 +101,88 @@ def split_data(
 ):
     save_dir = os.path.join("./data", data_source + "-" + split_type + "-" + str(seed))
     os.makedirs(save_dir, exist_ok=True)
-    logger.info(
-        "Splitting data  |  source=%s  split=%s  train_size=%.2f  seed=%d",
-        data_source,
-        split_type,
-        train_size,
-        seed,
-    )
     if data_source == "drugbank":
         if split_type == "random":
-            split_drugbank_random(
+            _split_drugbank_random(
                 pd.read_csv("./data/drugbank.tab", sep="\t"), train_size, seed, save_dir
             )
         else:
-            logger.warning(
-                "Split type '%s' not yet implemented for drugbank", split_type
-            )
+            raise TypeError()
     else:
-        logger.warning("Data source '%s' not yet implemented", data_source)
+        raise TypeError()
 
 
-def split_drugbank_random(df, train_size, seed, save_dir):
+def _split_drugbank_random(df: pd.DataFrame, train_size, seed, save_dir):
     drug1 = df[["ID1", "X1"]].drop_duplicates(keep="first")
     drug2 = df[["ID2", "X2"]].drop_duplicates(keep="first")
-    columns = ["id", "smile"]
-    drug1.columns = columns
-    drug2.columns = columns
+    drug1.columns = ["id", "smile"]
+    drug2.columns = ["id", "smile"]
     drug = (
         pd.concat([drug1, drug2])
-        .drop_duplicates(subset=columns, keep="first")
+        .drop_duplicates(subset=["id", "smile"], keep="first")
         .reset_index(drop=True)
     )
-    id_map = {key: i for i, key in enumerate(drug["id"])}
-
-    itc = df[["ID1", "ID2", "Y"]]
-    itc["ID1"] = itc["ID1"].map(lambda x: id_map.get(x, -1))
-    itc["ID2"] = itc["ID2"].map(lambda x: id_map.get(x, -1))
+    id_map = {row["id"]: row["smile"] for _, row in drug.iterrows()}
+    itc = df[["ID1", "ID2", "Y"]].drop_duplicates(keep="first").reset_index(drop=True)
     itc["Y"] = itc["Y"] - 1
     train, test = train_test_split(
         itc, train_size=train_size, random_state=seed, stratify=itc["Y"]
     )
-    os.makedirs(save_dir, exist_ok=True)
-    drug["smile"].to_csv(os.path.join(save_dir, "drug.csv"), index=False)
+
+    train_drug = (
+        pd.concat([train["ID1"], train["ID2"]], axis=0)
+        .drop_duplicates(keep="first")
+        .reset_index(drop=True)
+    )
+    train_map = {key: i for i, key in enumerate(train_drug)}
+    train["ID1"] = train["ID1"].map(train_map)
+    train["ID2"] = train["ID2"].map(train_map)
+    train_drug = train_drug.map(id_map)
+
+    test_drug = (
+        pd.concat([test["ID1"], test["ID2"]], axis=0)
+        .drop_duplicates(keep="first")
+        .reset_index(drop=True)
+    )
+    test_map = {key: i for i, key in enumerate(test_drug)}
+    test["ID1"] = test["ID1"].map(test_map)
+    test["ID2"] = test["ID2"].map(test_map)
+    test_drug = test_drug.map(id_map)
+
+    train_drug.name = "smile"
+    train_drug.to_csv(
+        os.path.join(save_dir, "train_drug.csv"),
+        index=False,
+    )
     train.columns = ["drug1", "drug2", "label"]
-    test.columns = ["drug1", "drug2", "label"]
     train.to_csv(
-        os.path.join(save_dir, "train.csv"),
-        columns=["drug1", "drug2", "label"],
+        os.path.join(save_dir, "train_itc.csv"),
         index=False,
     )
+
+    test_drug.name = "smile"
+    test_drug.to_csv(
+        os.path.join(save_dir, "test_drug.csv"),
+        index=False,
+    )
+    test.columns = ["drug1", "drug2", "label"]
     test.to_csv(
-        os.path.join(save_dir, "test.csv"),
-        columns=["drug1", "drug2", "label"],
+        os.path.join(save_dir, "test_itc.csv"),
         index=False,
     )
-    logger.info(
-        "Split complete  |  drugs=%d  total_pairs=%d  train=%d  test=%d  saved to %s",
-        len(drug),
-        len(df),
-        len(train),
-        len(test),
-        save_dir,
-    )
 
 
-def one_hot_encoding(x, allowable_set):
+def _one_hot_encoding(x, allowable_set):
     if x not in allowable_set:
         x = allowable_set[-1]
     return [int(x == s) for s in allowable_set]
 
 
-def atom_features(atom):
+def _atom_features(atom):
     features = []
 
     # 1. Atom symbol (38)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetSymbol(),
         [
             "H",
@@ -270,19 +227,19 @@ def atom_features(atom):
     )
 
     # 2. Degree (6)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetDegree(),
         [0, 1, 2, 3, 4, 5, 6],
     )
 
     # 3. Total hydrogens (5)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetTotalNumHs(),
         [0, 1, 2, 3, 4, 5],
     )
 
     # 4. Formal charge (5)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetFormalCharge(),
         [-2, -1, 0, 1, 2],
     )
@@ -294,7 +251,7 @@ def atom_features(atom):
     features.append(int(atom.IsInRing()))
 
     # 7. Hybridization (5)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetHybridization(),
         [
             Chem.rdchem.HybridizationType.SP,
@@ -306,7 +263,7 @@ def atom_features(atom):
     )
 
     # 8. Chiral tag (3)
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetChiralTag(),
         [
             Chem.rdchem.ChiralType.CHI_UNSPECIFIED,
@@ -318,11 +275,11 @@ def atom_features(atom):
     # 9. Atomic mass (1)
     features.append(atom.GetMass() / 100.0)
     # 10. 显式价态 7维
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetValence(ValenceType.EXPLICIT), [0, 1, 2, 3, 4, 5, 6, 7]
     )
     # 11. 隐式价态 7维
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         atom.GetValence(ValenceType.IMPLICIT), [0, 1, 2, 3, 4, 5, 6, 7]
     )
     # 12. 是否杂原子 1维 (C/H=0，其余=1)
@@ -343,7 +300,7 @@ def atom_features(atom):
     return features
 
 
-def bond_features(bond):
+def _bond_features(bond):
     bond_type = bond.GetBondType()
 
     features = [
@@ -356,7 +313,7 @@ def bond_features(bond):
     ]
 
     # Bond stereochemistry
-    features += one_hot_encoding(
+    features += _one_hot_encoding(
         bond.GetStereo(),
         [
             Chem.rdchem.BondStereo.STEREONONE,
@@ -378,21 +335,12 @@ def bond_features(bond):
 
 def smiles_to_graph(smiles):
     mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"Failed to parse SMILES: '{smiles}'")
-
-    try:
-        mol.UpdatePropertyCache(strict=False)
-        AllChem.ComputeGasteigerCharges(mol)
-    except Exception as e:
-        raise ValueError(
-            f"UpdatePropertyCache failed for SMILES: '{smiles}'. Original error: {e}"
-        ) from e
-
+    mol.UpdatePropertyCache(strict=False)
+    AllChem.ComputeGasteigerCharges(mol)
     # Node features
     x = []
     for atom in mol.GetAtoms():
-        x.append(atom_features(atom))
+        x.append(_atom_features(atom))
     x = torch.tensor(x, dtype=torch.float)
 
     # Edge features
@@ -401,7 +349,7 @@ def smiles_to_graph(smiles):
     for bond in mol.GetBonds():
         i = bond.GetBeginAtomIdx()
         j = bond.GetEndAtomIdx()
-        bf = bond_features(bond)
+        bf = _bond_features(bond)
 
         edge_index.append([i, j])
         edge_index.append([j, i])
@@ -474,4 +422,4 @@ def itc_collate_fn(batch):
     return torch.tensor(drug1), torch.tensor(drug2), torch.tensor(label)
 
 
-__all__ = ["Timer", "load_data", "split_data", "drug_collate_fn", "itc_collate_fn"]
+__all__ = ["Timer", "load_data", "split_data", "itc_collate_fn", "drug_collate_fn"]

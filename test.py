@@ -3,20 +3,15 @@ import pandas as pd
 import torch
 import config
 from process_data import load_data, drug_collate_fn, itc_collate_fn
-import model
-from model import Classifier
+from model import AttnGINTFEncoder, Classifier
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-import logging
 from config import Config
 
-logger = logging.getLogger("test")
-
-
-def test(config_class_name: str, config: Config):
-    name = config_class_name
-    encoder_type = config.encoder
+def _test(config: Config):
+    name = type(config).__name__
+    classifier_type = config.classifier
     data_source = config.data_source
     split_type = config.split_type
     node_dim = config.node_dim
@@ -33,18 +28,9 @@ def test(config_class_name: str, config: Config):
     label_smoothing = config.label_smoothing
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(
-        "Testing  |  name=%s  encoder=%s  device=%s  data_source=%s split_type=%s",
-        name,
-        encoder_type,
-        device,
-        data_source,
-        split_type,
-    )
 
     pin_memory = True if torch.cuda.is_available() else False
-    _, _, _, drug_set, test_itc = load_data(data_source, split_type, None, seed=seed)
-    assert drug_set is not None and test_itc is not None
+    drug_set,test_itc= load_data(data_source, split_type, "test", seed=seed)
     drug_loader = DataLoader(
         drug_set,
         collate_fn=drug_collate_fn,
@@ -61,13 +47,9 @@ def test(config_class_name: str, config: Config):
         num_workers=2,
         shuffle=False,
     )
-    encoder = getattr(model, encoder_type)
-    if encoder_type == "AttnGINTFEncoder":
-        encoder = encoder(
-            node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
-        ).to(device)
-    else:
-        encoder = encoder(node_dim, d_model, block_num, dp_r).to(device)
+    encoder = AttnGINTFEncoder(
+        node_dim, edge_dim, graph_dim, d_model, block_num, dp_r, heads
+    ).to(device)
     classifier = Classifier(d_model, class_num, dp_r).to(device)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
     base_dir = os.path.join("./checkpoints", name)
@@ -75,9 +57,6 @@ def test(config_class_name: str, config: Config):
     evaluate_path = os.path.join(base_dir, "evaluate.csv")
     evaluate = {}
     if not os.path.exists(best_path):
-        logger.warning(
-            "Best model not found: %s/best.pt — skipping evaluation", base_dir
-        )
         return
 
     best_model = torch.load(best_path, weights_only=False)
@@ -86,8 +65,6 @@ def test(config_class_name: str, config: Config):
 
     encoder.eval()
     classifier.eval()
-
-    logger.info("Evaluating on test set  |  best_epoch=%d", best_model["epoch"])
 
     test_loss = 0.0
 
@@ -123,24 +100,10 @@ def test(config_class_name: str, config: Config):
         all_labels, all_probs, multi_class="ovr", average="macro"
     )
     pd.DataFrame(evaluate).to_csv(evaluate_path, index=False)
-    logger.info(
-        "Test results  |  loss=%.5f  acc=%.5f  f1=%.5f  auc=%.5f  -> %s",
-        evaluate["test_loss"],
-        evaluate["test_acc"],
-        evaluate["test_f1_score"],
-        evaluate["test_auc"],
-        evaluate_path,
-    )
 
 
 def run_test(config_class_name: str):
-    cfg: Config
-    try:
-        cfg = getattr(config, config_class_name)
-    except AttributeError:
-        logger.warning("Config '%s' not found in config.py", config_class_name)
-        return
-    test(config_class_name, cfg)
+    _test(getattr(config, config_class_name))
 
 
 __all__ = ["run_test"]
