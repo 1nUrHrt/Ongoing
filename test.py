@@ -98,7 +98,7 @@ def _test(config: Config):
     evaluate["test_auc"] = roc_auc_score(
         all_labels, all_probs, multi_class="ovr", average="macro"
     )
-    pd.DataFrame(evaluate).to_csv(evaluate_path, index=False)
+    pd.DataFrame([evaluate]).to_csv(evaluate_path, index=False)
 
 
 def run_testing(config_class_name: str):

@@ -1,13 +1,15 @@
 import math
 import os.path
 from typing import Literal
+import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 import torch
 from rdkit import Chem
-from rdkit.Chem import Descriptors, rdMolDescriptors, AllChem, ValenceType
+from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Lipinski, GraphDescriptors,ValenceType
 from torch_geometric.data import Data, InMemoryDataset, Batch
+from rdkit.Chem import rdCIPLabeler
 import time
 
 
@@ -32,7 +34,9 @@ class DrugDataset(InMemoryDataset):
         self.file_name = f"{type}_drug.csv"
         self.proc_name = f"{type}_drug.pt"
         super().__init__(root, transform, pre_transform)
-        self._data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
+        self._data, self.slices = torch.load(
+            self.processed_paths[0], weights_only=False
+        )
 
     @property
     def processed_file_names(self):
@@ -183,6 +187,16 @@ def _one_hot_encoding(x, allowable_set):
     return [int(x == s) for s in allowable_set]
 
 
+ELECTRONEG = {
+    "H": 2.20, "Li": 0.98, "B": 2.04, "C": 2.55, "N": 3.04, "O": 3.44,
+    "F": 3.98, "Na": 0.93, "Mg": 1.31, "Al": 1.61, "Si": 1.90, "P": 2.19,
+    "S": 2.58, "Cl": 3.16, "K": 0.82, "Ca": 1.00, "Ti": 1.54, "Cr": 1.66,
+    "Fe": 1.83, "Co": 1.88, "Cu": 1.90, "Zn": 1.65, "Ga": 1.81, "As": 2.18,
+    "Se": 2.55, "Br": 2.96, "Sr": 0.95, "Tc": 1.90, "Ag": 1.93, "Sb": 2.05,
+    "I": 2.66, "La": 1.10, "Gd": 1.20, "Pt": 2.28, "Au": 2.54, "Hg": 2.00,
+    "Bi": 2.02, "Ra": 0.90
+}
+
 def _atom_features(atom):
     features = []
 
@@ -231,7 +245,7 @@ def _atom_features(atom):
         ],
     )
 
-    # 2. Degree (6)
+    # 2. Degree (7)
     features += _one_hot_encoding(
         atom.GetDegree(),
         [0, 1, 2, 3, 4, 5, 6],
@@ -255,18 +269,17 @@ def _atom_features(atom):
     # 6. In ring (1)
     features.append(int(atom.IsInRing()))
 
-    # 7. Hybridization (5)
-    features += _one_hot_encoding(
-        atom.GetHybridization(),
-        [
-            Chem.rdchem.HybridizationType.SP,
-            Chem.rdchem.HybridizationType.SP2,
-            Chem.rdchem.HybridizationType.SP3,
-            Chem.rdchem.HybridizationType.SP3D,
-            Chem.rdchem.HybridizationType.OTHER,
-        ],
-    )
-
+    # 7. Hybridization (7)
+    hyb_list = [
+        Chem.rdchem.HybridizationType.S,
+        Chem.rdchem.HybridizationType.SP,
+        Chem.rdchem.HybridizationType.SP2,
+        Chem.rdchem.HybridizationType.SP3,
+        Chem.rdchem.HybridizationType.SP3D,
+        Chem.rdchem.HybridizationType.SP3D2,
+        Chem.rdchem.HybridizationType.OTHER,
+    ]
+    features += _one_hot_encoding(atom.GetHybridization(), hyb_list)
     # 8. Chiral tag (3)
     features += _one_hot_encoding(
         atom.GetChiralTag(),
@@ -279,11 +292,11 @@ def _atom_features(atom):
 
     # 9. Atomic mass (1)
     features.append(atom.GetMass() / 100.0)
-    # 10. 显式价态 7维
+    # 10. 显式价态 8维
     features += _one_hot_encoding(
         atom.GetValence(ValenceType.EXPLICIT), [0, 1, 2, 3, 4, 5, 6, 7]
     )
-    # 11. 隐式价态 7维
+    # 11. 隐式价态 8维
     features += _one_hot_encoding(
         atom.GetValence(ValenceType.IMPLICIT), [0, 1, 2, 3, 4, 5, 6, 7]
     )
@@ -291,8 +304,7 @@ def _atom_features(atom):
     symbol = atom.GetSymbol()
     features.append(0 if symbol in ("C", "H") else 1)
     # 13. 原子电负性 1维 (归一化)
-    elect = atom.GetNumRadicalElectrons()  # 替换为电负性可自行查表映射
-    features.append(elect / 4.0)
+    features.append(ELECTRONEG.get(symbol, 2.5) / 4.0)
     # 14. Gasteiger 部分电荷 1维
     try:
         charge = float(atom.GetProp("_GasteigerCharge"))
@@ -301,6 +313,19 @@ def _atom_features(atom):
     if math.isnan(charge) or math.isinf(charge):
         charge = 0.0
     features.append(charge)
+
+    features.append(
+        int(symbol in ("O", "N", "S") and atom.GetTotalNumHs() > 0)
+    )
+
+    features.append(int(symbol in ("O", "N", "S", "F")))
+
+    # 17. CIP 手性标签 (3维: R, S, None)
+    try:
+        cip = atom.GetProp("_CIPCode") if atom.HasProp("_CIPCode") else "None"
+    except:
+        cip = "None"
+    features += _one_hot_encoding(cip, ["R", "S", "None"])
 
     return features
 
@@ -334,6 +359,20 @@ def _bond_features(bond):
     features.append(int(bond.GetIsAromatic()))
     # 3. 共轭环键 1维
     features.append(int(bond.GetIsConjugated() and bond.IsInRing()))
+    # 4. 键在 ≤6 元环内 (1维)
+    features.append(int(any(bond.IsInRingSize(s) for s in range(3, 7))))
+    # 5. 两端原子形式电荷差 (1维)
+    f1 = bond.GetBeginAtom().GetFormalCharge()
+    f2 = bond.GetEndAtom().GetFormalCharge()
+    features.append(f1 - f2)
+    # 6. 键是否连接杂原子 (1维)
+    sym1 = bond.GetBeginAtom().GetSymbol()
+    sym2 = bond.GetEndAtom().GetSymbol()
+    # 7. 桥键特征：两端原子环状态不同 (1维)
+    r1 = bond.GetBeginAtom().IsInRing()
+    r2 = bond.GetEndAtom().IsInRing()
+    features.append(int(r1 != r2))
+    features.append(0 if sym1 in ("C", "H") and sym2 in ("C", "H") else 1)
 
     return features
 
@@ -347,6 +386,11 @@ def smiles_to_graph(smiles):
     for atom in mol.GetAtoms():
         x.append(_atom_features(atom))
     x = torch.tensor(x, dtype=torch.float)
+    # 分配 CIP 标签（用于手性特征）
+    try:
+        rdCIPLabeler.AssignCIPLabels(mol)
+    except:
+        pass 
 
     # Edge features
     edge_index = []
@@ -367,7 +411,7 @@ def smiles_to_graph(smiles):
     # ========== 全局特征 ==========
     gw = Descriptors.MolWt(mol) / 500.0
     logp = Descriptors.MolLogP(mol) / 10.0
-    tpsa = Descriptors.TPSA(mol) / 200.0
+    tpsa = Descriptors.TPSA(mol) / 250.0
     hdonor = Descriptors.NumHDonors(mol) / 10.0
     haccept = Descriptors.NumHAcceptors(mol) / 10.0
     rot_bond = Descriptors.NumRotatableBonds(mol) / 20.0
@@ -382,7 +426,8 @@ def smiles_to_graph(smiles):
     # 摩尔折射率
     mr = Descriptors.MolMR(mol) / 100.0
     # 分子柔性指数
-    frac_rot = Descriptors.NumRotatableBonds(mol) / max(1, mol.GetNumBonds())
+    total_bonds = mol.GetNumBonds()
+    frac_rot = Descriptors.NumRotatableBonds(mol) / max(1, total_bonds)
     # 卤素原子总数
     halogens = (
         sum(1 for a in mol.GetAtoms() if a.GetSymbol() in ("F", "Cl", "Br", "I")) / 10.0
@@ -390,25 +435,40 @@ def smiles_to_graph(smiles):
     # 氧原子数、氮原子数
     o_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "O") / 10.0
     n_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "N") / 10.0
+    # 分子复杂度 (BertzCT)
+    complexity = GraphDescriptors.BertzCT(mol) / 1000.0
+    # 不饱和碳原子比例
+    unsaturated_c = len(mol.GetSubstructMatches(Chem.MolFromSmarts('[C]=[C]')))
+    unsat_c_ratio = unsaturated_c / max(1, Descriptors.HeavyAtomCount(mol))
+    # Fsp3 (sp3杂化碳比例)
+    fsp3 = Lipinski.FractionCSP3(mol) if total_bonds > 0 else 0.0
+    # 正/负电荷数
+    pos_charge = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() > 0) / 5.0
+    neg_charge = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() < 0) / 5.0
+    # 刚性键比例
+    rigid_bonds = total_bonds - Descriptors.NumRotatableBonds(mol)
+    rigid_ratio = rigid_bonds / max(1, total_bonds)
+    # Kappa 形状指数 (归一化)
+    kappa1 = GraphDescriptors.Kappa1(mol) / 20.0
+    kappa2 = GraphDescriptors.Kappa2(mol) / 20.0
+    kappa3 = GraphDescriptors.Kappa3(mol) / 20.0
+    # Chi 分子连接性指数 (归一化)
+    chi0v = GraphDescriptors.Chi0v(mol) / 10.0
+    chi1v = GraphDescriptors.Chi1v(mol) / 10.0
+    chi2v = GraphDescriptors.Chi2v(mol) / 10.0
 
+    gen = Chem.rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
+    fp = gen.GetFingerprint(mol) 
+    tensor_fp = torch.tensor(np.array(fp), dtype=torch.float).unsqueeze(0)
     graph_attr = [
-        gw,
-        logp,
-        tpsa,
-        hdonor,
-        haccept,
-        rot_bond,
-        ring_num,
-        heavy_atom,
-        aromatic_ring,
-        aliphatic_ring,
-        mr,
-        frac_rot,
-        halogens,
-        o_count,
-        n_count,
+        gw, logp, tpsa, hdonor, haccept, rot_bond, ring_num,
+        heavy_atom, aromatic_ring, aliphatic_ring, mr, frac_rot,
+        halogens, o_count, n_count,
+        complexity, unsat_c_ratio, fsp3, pos_charge, neg_charge,
+        rigid_ratio, kappa1, kappa2, kappa3, chi0v, chi1v, chi2v
     ]
     graph_attr = torch.tensor(graph_attr, dtype=torch.float).unsqueeze(0)
+    graph_attr = torch.cat([graph_attr,tensor_fp],dim=1)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, graph_attr=graph_attr)
 
 

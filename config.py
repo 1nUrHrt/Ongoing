@@ -1,14 +1,14 @@
 from model import Config
 
 
-class attn_gin_tf_B5(Config):
+class attn_gin_tf_B5_g(Config):
     classifier = "MClassifier"
     data_source = "drugbank"
     split_type = "random"
     epochs = 200
-    node_dim = 86
-    edge_dim = 13
-    graph_dim = 15
+    node_dim = 93
+    edge_dim = 17
+    graph_dim = 1051
     d_model = 128
     lr = 0.001
     heads = 8
@@ -23,14 +23,15 @@ class attn_gin_tf_B5(Config):
     weight_decay = 5e-4
     num_workers = 0
 
-class attn_gin_tf_B8(Config):
+
+class attn_gin_tf_B8_g(Config):
     classifier = "MClassifier"
     data_source = "drugbank"
     split_type = "random"
     epochs = 200
-    node_dim = 86
-    edge_dim = 13
-    graph_dim = 15
+    node_dim = 93
+    edge_dim = 17
+    graph_dim = 1051
     d_model = 128
     lr = 0.001
     heads = 8
@@ -45,14 +46,15 @@ class attn_gin_tf_B8(Config):
     weight_decay = 5e-4
     num_workers = 0
 
-class attn_gin_tf_B10(Config):
+
+class attn_gin_tf_B10_g(Config):
     classifier = "MClassifier"
     data_source = "drugbank"
     split_type = "random"
     epochs = 200
-    node_dim = 86
-    edge_dim = 13
-    graph_dim = 15
+    node_dim = 93
+    edge_dim = 17
+    graph_dim = 1051
     d_model = 128
     lr = 0.001
     heads = 8
