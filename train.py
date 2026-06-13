@@ -1,7 +1,13 @@
 import os
 import random
 import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -11,8 +17,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from process_data import Timer, load_data, itc_collate_fn, drug_collate_fn
 from model import EarlyStop, Classifier, AttnGINTFEncoder
+from config import BaseConfig
 import config
-from config import Config
 from custom_printer import train_ptr as ptr, ptr_color
 
 
@@ -44,9 +50,14 @@ def _train_one_epoch(
                     [encoder(drugs.to(device)) for drugs in drug_loader]
                 )
                 logits = classifier(all_drugs[d1], all_drugs[d2])
+                logits = torch.clamp(logits, min=-8.0, max=8.0)
                 loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                list(encoder.parameters()) + list(classifier.parameters()), max_norm=1.0
+            )
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -54,6 +65,9 @@ def _train_one_epoch(
             logits = classifier(all_drugs[d1], all_drugs[d2])
             loss = criterion(logits, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(encoder.parameters()) + list(classifier.parameters()), max_norm=1.0
+            )
             optimizer.step()
 
         preds = torch.argmax(logits, dim=1)
@@ -94,6 +108,7 @@ def _val_one_epoch(
         for d1, d2, labels in itc_loader:
             d1, d2, labels = d1.to(device), d2.to(device), labels.to(device)
             logits = classifier(all_drugs[d1], all_drugs[d2])
+            logits = torch.clamp(logits, min=-8.0, max=8.0)
             loss = criterion(logits, labels)
 
             preds = torch.argmax(logits, dim=-1)
@@ -110,14 +125,17 @@ def _val_one_epoch(
     acc = accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
     auc = roc_auc_score(all_labels, all_probs, multi_class="ovr", average="macro")
-    cm = confusion_matrix(all_labels, all_preds)
-    return (avg_loss, acc, f1, auc, cm)
+    precision = precision_score(all_labels, all_preds, average="macro",zero_division=0)
+    recall = recall_score(all_labels, all_preds, average="macro",zero_division=0)
+    return (avg_loss, acc, f1, auc, precision, recall)
 
 
 def _train(
-    config: Config,
+    config: BaseConfig,
     history=None,
 ):
+    torch.autograd.set_detect_anomaly(True)
+
     name = config.__name__
     clssifier_type = config.classifier
     data_source = config.data_source
@@ -132,6 +150,8 @@ def _train(
     dp_r = config.dp_r
     train_size = config.train_size
     weight_decay = config.weight_decay
+    patience = config.patience
+    min_delta = config.min_delta
     seed = config.seed
     block_num = config.block_num
     class_num = config.class_num
@@ -140,7 +160,6 @@ def _train(
     label_smoothing = config.label_smoothing
     num_workers = config.num_workers
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
     start_epoch = 0
     random.seed(seed)
     np.random.seed(seed)
@@ -154,9 +173,7 @@ def _train(
     base_dir = os.path.join("./checkpoints", name)
     os.makedirs(base_dir, exist_ok=True)
     best_path = os.path.join(base_dir, "best.pt")
-    history_path = os.path.join(base_dir, "history.pt")
-    result_path = os.path.join(base_dir, "result.csv")
-    cm_path = os.path.join(base_dir, "confusion_matrix.csv")
+    evaluate_path = os.path.join(base_dir, "evaluate.csv")
 
     drug_set, itc_set = load_data(data_source, split_type, "train", seed)
     train_idx, val_idx = train_test_split(
@@ -204,9 +221,9 @@ def _train(
     )
     scheduler = CosineAnnealingLR(optimizer, epochs, eta_min=0.00001)
     criterion = CrossEntropyLoss(label_smoothing=label_smoothing)
-    early_stop = EarlyStop(patience=10, mode="max", min_delta=0.001)
+    early_stop = EarlyStop(patience=patience, mode="max", min_delta=min_delta)
     scaler = torch.GradScaler() if torch.cuda.is_available() else None
-
+    # scaler =None
     ptr.set_value_batch(
         {
             "name": name,
@@ -233,6 +250,8 @@ def _train(
         "train_timer": [],
         "val_loss": [],
         "val_acc": [],
+        "val_precision": [],
+        "val_recall": [],
         "val_f1_score": [],
         "val_auc": [],
         "val_timer": [],
@@ -326,13 +345,15 @@ def _train(
 
         with Timer() as timer:
             ptr.w_flush("state", "valdating", ptr_color.validating)
-            val_loss, val_acc, val_f1_score, val_auc, cm = _val_one_epoch(
-                encoder,
-                classifier,
-                drug_loader,
-                val_loader,
-                criterion,
-                device,
+            val_loss, val_acc, val_f1_score, val_auc, val_precision, val_recall = (
+                _val_one_epoch(
+                    encoder,
+                    classifier,
+                    drug_loader,
+                    val_loader,
+                    criterion,
+                    device,
+                )
             )
         total_timer += timer.elapsed
         result["val_loss"].append(val_loss)
@@ -340,10 +361,11 @@ def _train(
         result["val_f1_score"].append(val_f1_score)
         result["val_auc"].append(val_auc)
         result["val_timer"].append(timer.elapsed)
-
+        result["val_precision"].append(val_precision)
+        result["val_recall"].append(val_recall)
         ptr.write(
             "val",
-            f"loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1_score:.5f}  auc={val_auc:.5f}  ({timer.elapsed:.5f} s)",
+            f"loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1_score:.5f}  auc={val_auc:.5f}  precision={val_precision:.5f} recall={val_recall:.5f} ({timer.elapsed:.5f} s)",
         )
         ptr.write(
             "elapsed",
@@ -357,18 +379,34 @@ def _train(
         if is_improved:
             torch.save(
                 {
-                    "epoch": current_epoch,
                     "encoder": encoder.state_dict(),
                     "classifier": classifier.state_dict(),
                 },
                 best_path,
             )
-            cm_df = pd.DataFrame(
-                cm,
-                index=[f"True_{i}" for i in range(class_num)],
-                columns=[f"Pred_{i}" for i in range(class_num)],
+            pd.DataFrame(
+                {
+                    "epoch": [current_epoch],
+                    "loss": [val_loss],
+                    "acc": [val_acc],
+                    "precision": [val_precision],
+                    "recall": [val_recall],
+                    "f1_score": [val_f1_score],
+                    "auc": [val_auc],
+                }
+            ).to_csv(evaluate_path, index=False)
+            _save_checkpoint(
+                current_epoch,
+                encoder,
+                classifier,
+                optimizer,
+                scheduler,
+                early_stop,
+                scaler,
+                train_itc_generator,
+                result,
+                base_dir,
             )
-            cm_df.to_csv(cm_path)
             ptr.write(
                 "early_stop",
                 f"{early_stop.counter}/{early_stop.patience}",
@@ -381,12 +419,12 @@ def _train(
             )
             ptr.write(
                 "best",
-                f"[{current_epoch}/{epochs}] loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1_score:.5f}  auc={val_auc:.5f}  ({timer.elapsed:.5f} s)",
+                f"[{current_epoch}/{epochs}] loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1_score:.5f}  auc={val_auc:.5f}  precision={val_precision:.5f} recall={val_recall:.5f}  ({timer.elapsed:.5f} s)",
                 ptr_color.pending,
             )
             ptr.scl_flush(
                 "info",
-                f"[{current_epoch}/{epochs}] best model improved → saved best.pt and confusion_matrix.csv",
+                f"[{current_epoch}/{epochs}] best model improved → saved best.pt and evaluate.csv",
                 ptr_color.notice,
             )
         else:
@@ -401,30 +439,18 @@ def _train(
                 ptr_color.warning,
             )
 
-        checkpoint = {
-            "epoch": current_epoch,
-            "encoder": encoder.state_dict(),
-            "classifier": classifier.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "early_stop": early_stop.state_dict(),
-            "scaler": scaler.state_dict() if scaler is not None else None,
-            "cuda_random": torch.cuda.get_rng_state_all()
-            if torch.cuda.is_available()
-            else None,
-            "torch_random": torch.random.get_rng_state(),
-            "numpy_random": np.random.get_state(),
-            "python_random": random.getstate(),
-            "train_itc_generator": train_itc_generator.get_state(),
-        }
-
-        if current_epoch % 5 == 0:
-            torch.save(checkpoint, history_path)
-            pd.DataFrame(result).to_csv(result_path, index=False)
-            ptr.scl_flush(
-                "info",
-                f"[{current_epoch}/{epochs}]  checkpoint saved (history.pt + result.csv)",
-                ptr_color.notice,
+        if current_epoch % 20 == 0:
+            _save_checkpoint(
+                current_epoch,
+                encoder,
+                classifier,
+                optimizer,
+                scheduler,
+                early_stop,
+                scaler,
+                train_itc_generator,
+                result,
+                base_dir,
             )
 
         if early_stop.early_stop:
@@ -439,13 +465,64 @@ def _train(
                 ptr_color.warning,
             )
             ptr.w_flush("state", "finished", ptr_color.done)
+            _save_checkpoint(
+                current_epoch,
+                encoder,
+                classifier,
+                optimizer,
+                scheduler,
+                early_stop,
+                scaler,
+                train_itc_generator,
+                result,
+                base_dir,
+            )
             break
+
+
+def _save_checkpoint(
+    epoch,
+    encoder,
+    classifier,
+    optimizer,
+    scheduler,
+    early_stop,
+    scaler,
+    train_itc_generator,
+    result,
+    base_dir,
+):
+    history_path = os.path.join(base_dir, "history.pt")
+    result_path = os.path.join(base_dir, "result.csv")
+    checkpoint = {
+        "epoch": epoch,
+        "encoder": encoder.state_dict(),
+        "classifier": classifier.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "early_stop": early_stop.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "cuda_random": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else None,
+        "torch_random": torch.random.get_rng_state(),
+        "numpy_random": np.random.get_state(),
+        "python_random": random.getstate(),
+        "train_itc_generator": train_itc_generator.get_state(),
+    }
+    torch.save(checkpoint, history_path)
+    pd.DataFrame(result).to_csv(result_path, index=False)
+    ptr.scl_flush(
+        "info",
+        f"[Epoch:{epoch}]  checkpoint saved (history.pt + result.csv)",
+        ptr_color.notice,
+    )
 
 
 def resume_training(config_class_name: str):
     cfg = getattr(config, config_class_name)
-    history_path = os.path.join("./checkpoints", type(cfg).__name__, "history.pt")
-    result_path = os.path.join("./checkpoints", type(cfg).__name__, "result.csv")
+    history_path = os.path.join("./checkpoints", cfg.__name__, "history.pt")
+    result_path = os.path.join("./checkpoints", cfg.__name__, "result.csv")
     history = torch.load(history_path, weights_only=False)
     result = pd.read_csv(result_path)
     history["result"] = result

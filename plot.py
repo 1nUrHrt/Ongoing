@@ -1,7 +1,6 @@
 import os
 
 from matplotlib.ticker import MultipleLocator
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -13,7 +12,7 @@ def heatmap(file_name: str):
 
     out_dir = os.path.join("./graph", file_name)
     os.makedirs(out_dir, exist_ok=True)
-    cm_df = pd.read_csv(f"./checkpoints/{file_name}/confusion_matrix.csv", index_col=0)
+    cm_df = pd.read_csv(f"./checkpoints/{file_name}/cm.csv", index_col=0)
 
     cm = cm_df.values
 
@@ -112,7 +111,10 @@ def line_chart(file_name: str):
 
 
 if __name__ == "__main__":
-    dirs = os.listdir("./checkpoints/")
-    for i in dirs:
-        line_chart(i)
-        heatmap(i)
+    # dirs = os.listdir("./checkpoints/")
+    # for i in dirs:
+    #     line_chart(i)
+    #     heatmap(i)
+
+
+    heatmap("BN8")

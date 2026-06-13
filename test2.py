@@ -9,7 +9,7 @@ from process_data import (
     smiles_to_graph
 )
 from torch.utils.data import DataLoader
-
+from model import AttnGINTFEncoder
 
 def test_drug_num_workers(num_workers):
 
@@ -68,7 +68,13 @@ def has_nan_inf():
         print("graph_attr_has_inf",graph_attr_has_inf)
 
 if __name__ == "__main__":
-    mol = smiles_to_graph("CN1CCN(CC(=O)N2C3=CC=CC=C3C(=O)NC3=C2N=CC=C3)CC1"	"CN1CCN2C(C1)C1=CC=CC=C1CC1=CC=CC=C21")
-    print(mol)
+    
+    # drug,index = torch.load("./split_data/drugbank-random-42/processed/train_drug.pt",weights_only=False)
+    # print(drug.x.device)
+    # encoder = AttnGINTFEncoder(93,17,1051,256,6,0.1,8).cuda()
+    # for m in encoder.modules():
+    #     print(m)
+    # mol = smiles_to_graph("CN1CCN(CC(=O)N2C3=CC=CC=C3C(=O)NC3=C2N=CC=C3)CC1"	"CN1CCN2C(C1)C1=CC=CC=C1CC1=CC=CC=C21")
+    # print(mol)
     # drug_set = DrugDataset("./split_data/drugbank-random-42")
     # print
